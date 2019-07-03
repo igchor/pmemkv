@@ -30,6 +30,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "../../src/engine_factory.h"
 #include <memory>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
@@ -372,66 +373,11 @@ int pmemkv_open(const char *engine_c_str, pmemkv_config *config, pmemkv_db **db)
 		auto cfg = std::unique_ptr<pmem::kv::internal::config>(
 			reinterpret_cast<pmem::kv::internal::config *>(config));
 
-		if (engine == "blackhole") {
-			*db = reinterpret_cast<pmemkv_db *>(
-				new pmem::kv::blackhole(std::move(cfg)));
+		std::cerr << COUNTER_GET() << std::endl;
+		auto &x = engine_factory::get_instance<COUNTER_GET() - 1>();
+		*db = (pmemkv_db *)x.create_engine(engine, std::move(cfg));
 
-			return PMEMKV_STATUS_OK;
-		}
-#ifdef ENGINE_CACHING
-		if (engine == "caching") {
-			*db = reinterpret_cast<pmemkv_db *>(
-				new pmem::kv::caching(std::move(cfg)));
-
-			return PMEMKV_STATUS_OK;
-		}
-#endif
-
-#ifdef ENGINE_TREE3
-		if (engine == "tree3") {
-			*db = reinterpret_cast<pmemkv_db *>(
-				new pmem::kv::tree3(std::move(cfg)));
-
-			return PMEMKV_STATUS_OK;
-		}
-#endif
-
-#ifdef ENGINE_STREE
-		if (engine == "stree") {
-			*db = reinterpret_cast<pmemkv_db *>(
-				new pmem::kv::stree(std::move(cfg)));
-
-			return PMEMKV_STATUS_OK;
-		}
-#endif
-
-#ifdef ENGINE_CMAP
-		if (engine == "cmap") {
-			*db = reinterpret_cast<pmemkv_db *>(
-				new pmem::kv::cmap(std::move(cfg)));
-
-			return PMEMKV_STATUS_OK;
-		}
-#endif
-
-#ifdef ENGINE_VSMAP
-		if (engine == "vsmap") {
-			*db = reinterpret_cast<pmemkv_db *>(
-				new pmem::kv::vsmap(std::move(cfg)));
-
-			return PMEMKV_STATUS_OK;
-		}
-#endif
-
-#ifdef ENGINE_VCMAP
-		if (engine == "vcmap") {
-			*db = reinterpret_cast<pmemkv_db *>(
-				new pmem::kv::vcmap(std::move(cfg)));
-
-			return PMEMKV_STATUS_OK;
-		}
-#endif
-		throw std::runtime_error("Unknown engine name");
+		return PMEMKV_STATUS_OK;
 	} catch (std::exception &e) {
 		ERR() << e.what();
 		*db = nullptr;

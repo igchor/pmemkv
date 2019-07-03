@@ -1,5 +1,7 @@
+#include "engine_factory.h"
+
 /*
- * Copyright 2017-2019, Intel Corporation
+ * Copyright 2019, Intel Corporation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,47 +32,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef LIBPMEMKV_ENGINE_BLACKHOLE_H
-#define LIBPMEMKV_ENGINE_BLACKHOLE_H
+#include "engine_factory.h"
 
-#include "../engine.h"
-#include "../engine_factory.h"
-
-namespace pmem
-{
-namespace kv
-{
-
-class blackhole : public engine_base {
-public:
-	blackhole(std::unique_ptr<internal::config> cfg);
-	~blackhole();
-
-	std::string name() final;
-
-	status count_all(std::size_t &cnt) final;
-	status count_above(string_view key, std::size_t &cnt) final;
-	status count_below(string_view key, std::size_t &cnt) final;
-	status count_between(string_view key1, string_view key2, std::size_t &cnt) final;
-
-	status get_all(get_kv_callback *callback, void *arg) final;
-	status get_above(string_view key, get_kv_callback *callback, void *arg) final;
-	status get_below(string_view key, get_kv_callback *callback, void *arg) final;
-	status get_between(string_view key1, string_view key2, get_kv_callback *callback,
-			   void *arg) final;
-
-	status exists(string_view key) final;
-
-	status get(string_view key, get_v_callback *callback, void *arg) final;
-
-	status put(string_view key, string_view value) final;
-
-	status remove(string_view key) final;
-};
-
-} /* namespace kv */
-} /* namespace pmem */
-
-REGISTER_ENGINE("blackhole", pmem::kv::blackhole);
-
-#endif
+map_type engine_factory::map;

@@ -33,6 +33,7 @@
 #pragma once
 
 #include "../engine.h"
+#include "../engine_factory.h"
 #include "../polymorphic_string.h"
 
 #include <libpmemobj++/persistent_ptr.hpp>
@@ -121,3 +122,5 @@ private:
 
 } /* namespace kv */
 } /* namespace pmem */
+
+REGISTER_ENGINE("camp", pmem::kv::cmap);
