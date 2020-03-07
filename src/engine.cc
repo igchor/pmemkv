@@ -58,6 +58,8 @@
 #include "engines-experimental/tree3.h"
 #endif
 
+#include "engines/radix_tree.h"
+
 namespace pmem
 {
 namespace kv
@@ -109,6 +111,11 @@ engine_base::create_engine(const std::string &engine,
 	if (engine == "blackhole")
 		return std::unique_ptr<engine_base>(
 			new pmem::kv::blackhole(std::move(cfg)));
+
+	if (engine == "radix_tree") {
+		engine_base::check_config_null(engine, cfg);
+		return std::unique_ptr<engine_base>(new pmem::kv::radix_tree(std::move(cfg)));
+	}
 
 #ifdef ENGINE_CMAP
 	if (engine == "cmap") {

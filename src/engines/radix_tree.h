@@ -34,6 +34,10 @@
 
 #include "../pmemobj_engine.h"
 #include <libpmemobj++/persistent_ptr.hpp>
+#include <libpmemobj++/make_persistent.hpp>
+#include <libpmemobj++/transaction.hpp>
+
+#define util_mssb_index64(value) ((unsigned char)(63 - __builtin_clzll(value)))
 
 namespace pmem
 {
@@ -80,14 +84,6 @@ namespace radix_tree
  * instead we have a remove count.  The grace period is DELETED_LIFE,
  * after which any read will notice staleness and restart its work.
  */
-#include <errno.h>
-#include <stdbool.h>
-
-#include "alloc.h"
-#include "critnib.h"
-#include "out.h"
-#include "sys_util.h"
-#include "valgrind_internal.h"
 
 /*
  * A node that has been deleted is left untouched for this many delete
@@ -122,6 +118,65 @@ typedef unsigned char sh_t;
 
 // };
 
+
+struct critnib_node;
+struct critnib_leaf;
+
+struct tagged_node_ptr : public obj::persistent_ptr_base
+{
+	tagged_node_ptr() = default;
+
+	tagged_node_ptr(const obj::persistent_ptr<critnib_leaf> &ptr): obj::persistent_ptr_base({ptr.raw().pool_uuid_lo, ptr.raw().off | 1})
+	{
+	}
+
+	tagged_node_ptr(const obj::persistent_ptr<critnib_node> &ptr): obj::persistent_ptr_base(ptr)
+	{
+	}
+
+	tagged_node_ptr& operator=(const tagged_node_ptr& rhs)
+	{
+		obj::persistent_ptr_base::operator=(static_cast<const obj::persistent_ptr_base&>(rhs));
+		return *this;
+	}
+
+	tagged_node_ptr& operator=(std::nullptr_t)
+	{
+		obj::persistent_ptr_base::operator=(nullptr);
+		return *this;
+	}
+
+	tagged_node_ptr& operator=(const obj::persistent_ptr<critnib_leaf>& rhs)
+	{
+		return this->operator=(tagged_node_ptr(rhs));
+	}
+
+	tagged_node_ptr& operator=(const obj::persistent_ptr<critnib_node> &rhs)
+	{
+		return this->operator=(tagged_node_ptr(rhs));
+	}
+
+	bool is_leaf()
+	{
+		return raw().off & 1;
+	}
+
+	obj::persistent_ptr<critnib_leaf> get_leaf()
+	{
+		return obj::persistent_ptr<critnib_leaf>({raw().pool_uuid_lo, raw().off & ~1ULL});
+	}
+
+	obj::persistent_ptr<critnib_node> get_node()
+	{
+		return obj::persistent_ptr<critnib_node>(raw());
+	}
+
+	explicit operator bool() const noexcept
+	{
+		return oid.off != 0;
+	}
+};
+
 struct critnib_node {
 	/*
 	 * path is the part of a tree that's already traversed (be it through
@@ -138,67 +193,26 @@ struct critnib_node {
 	 *              +-----+
 	 *               shift
 	 */
-	obj::tagged_node_ptr child[SLNODES];
-	uint64_t path;
-	sh_t shift;
+	tagged_node_ptr child[SLNODES];
+	obj::p<uint64_t> path;
+	obj::p<sh_t> shift;
 };
 
 struct critnib_leaf {
-	uint64_t key;
-	void *value;
-};
-
-struct tagged_node_ptr
-{
-	tagged_node_ptr(const obj::persistent_ptr<critnib_leaf> &ptr)
+	template <typename... Args>
+	critnib_leaf(uint64_t key, Args &&... args): 
+		key(key), value(std::forward<Args>(args)...)
 	{
-		this->ptr = ptr;
-		this->ptr.raw().off |= 1;
 	}
 
-	tagged_node_ptr(const obj::persistent_ptr<critnib_node> &ptr)
-	{
-		this->ptr = ptr;
-	}
-
-	tagged_node_ptr& operator=(const tagged_node_ptr& rhs)
-	{
-		ptr = rhs.ptr;
-		return *this;
-	}
-
-	tagged_node_ptr& operator=(const obj::persistent_ptr<critnib_leaf>& rhs)
-	{
-		return this->operator=(tagged_node_ptr(rhs));
-	}
-
-	tagged_node_ptr& operator=(const obj::persistent_ptr<critnib_node> &rhs)
-	{
-		return this->operator=(tagged_node_ptr(rhs));
-	}
-
-	bool is_leaf()
-	{
-		return ptr.raw().off & 1;
-	}
-
-	obj::persistent_ptr<critnib_leaf> get_leaf()
-	{
-		return obj::persistent_ptr<critnib_leaf>({ptr.raw().pool_uuid_lo, ptr.raw().off & ~1ULL});
-	}
-
-	obj::persistent_ptr<critnib_node> get_node()
-	{
-		return obj::persistent_ptr<critnib_node>(ptr.raw());
-	}
-
-	obj::persistent_ptr_base ptr;
+	obj::p<uint64_t> key;
+	obj::string value;
 };
 
 class pmem_radix {
+public:
 	pmem_radix()
 	{
-		root = nullptr;
 	}
 
 	~pmem_radix()
@@ -217,55 +231,57 @@ class pmem_radix {
 	*
 	* Takes a global write lock but doesn't stall any readers.
 	*/
+	template <typename... Args>
 	int
-	insert(uint64_t key, void *value)
+	insert(uint64_t key, Args &&... args)
 	{
-		auto leaf_ptr = obj::make_persistent<critnib_leaf>();
-		k->key = key;
-		k->value = value; // XXX value void* -> X
+		auto pop = obj::pool_base(pmemobj_pool_by_ptr(this));
 
-		auto n = root.get();
-		if (!n) {
-			root = leaf_ptr;
+		obj::transaction::run(pop, [&]{
+			auto n = root;
+			if (!n) {
+				root = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+				return;
+			}
 
-			return 0;
-		}
+			auto *parent = &root;
+			auto prev = root;
 
-		auto *parent = &root;
-		auto prev = root;
+			while (n && !n.is_leaf() && (key & path_mask(n.get_node()->shift)) == n.get_node()->path) {
+				prev = n;
+				parent = &n.get_node()->child[slice_index(key, n.get_node()->shift)];
+				n = *parent;
+			}
 
-		while (n && !n.is_leaf() && (key & path_mask(n.get_node()->shift)) == n.get_node()->path) {
-			prev = n;
-			parent = &n.get_node()->child[slice_index(key, n.get_node()->shift)];
-			n = *parent;
-		}
+			if (!n) {
+				n = prev;
+				n.get_node()->child[slice_index(key, n.get_node()->shift)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+				return;
+			}
 
-		if (!n) {
-			n = prev;
-			n.get_node()->child[slice_index(key, n.get_node()->shift) = leaf_ptr;
+			uint64_t path = n.is_leaf() ? n.get_leaf()->key : n.get_node()->path;
+			/* Find where the path differs from our key. */
+			uint64_t at = path ^ key;
+			if (!at) {
+				assert(n.is_leaf());
+				n.get_leaf()->value.assign(std::forward<Args>(args)...);
 
-			return 0;
-		}
+				return;
+				// XXX - what should be the strategy?
+				// obj::delete_persistent<critnib_leaf>(leaf_ptr);
+				// return EEXIST;
+			}
 
-		uint64_t path = n.is_leaf() ? n.get_leaf()->key : n.get_node()->path;
-		/* Find where the path differs from our key. */
-		uint64_t at = path ^ key;
-		if (!at) {
-			assert(n.is_leaf());
-			obj::delete_persistent<critnib_node>(leaf_ptr);
+			/* and convert that to an index. */
+			sh_t sh = util_mssb_index64(at) & (sh_t)~(SLICE - 1);
+			auto m = obj::make_persistent<critnib_node>();
 
-			return EEXIST;
-		}
-
-		/* and convert that to an index. */
-		sh_t sh = util_mssb_index64(at) & (sh_t)~(SLICE - 1);
-		auto m = obj::make_persistent<critnib_node>();
-
-		m->child[slice_index(key, sh)] = leaf_ptr;
-		m->child[slice_index(path, sh)] = n;
-		m->shift = sh;
-		m->path = key & path_mask(sh);
-		*parent = m;
+			m->child[slice_index(key, sh)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+			m->child[slice_index(path, sh)] = n;
+			m->shift = sh;
+			m->path = key & path_mask(sh);
+			*parent = m;
+		});
 
 		return 0;
 	}
@@ -280,7 +296,7 @@ class pmem_radix {
 	* Counterintuitively, it's pointless to return the most current answer,
 	* we need only one that was valid at any point after the call started.
 	*/
-	void *
+	obj::string*
 	get(uint64_t key)
 	{
 			auto n = root;
@@ -291,10 +307,80 @@ class pmem_radix {
 			* going wrong way if our path is missing, but that's ok...
 			*/
 			while (n && !n.is_leaf())
-				n = n->child[slice_index(key, n->shift)];
+				n = n.get_node()->child[slice_index(key, n.get_node()->shift)];
 
-			return (n && n->key == key) ? n->value : NULL;
+			return (n && n.get_leaf()->key == key) ? &n.get_leaf()->value : nullptr;
 	}
+
+	/*
+	* critnib_remove -- delete a key from the critnib structure, return its value
+	*/
+	bool
+	remove(uint64_t key)
+	{
+		auto pop = obj::pool_base(pmemobj_pool_by_ptr(this));
+
+		auto n = root;
+		if (!n)
+			return false;
+
+		if (n.is_leaf()) {
+			if (n.get_leaf()->key == key) {
+				obj::transaction::run(pop, [&]{
+					root = nullptr;
+					obj::delete_persistent<critnib_leaf>(n.get_leaf());
+				});
+
+				return true;
+			}
+
+			return false;
+		}
+
+		/*
+		* n and k are a parent:child pair (after the first iteration); k is the
+		* leaf that holds the key we're deleting.
+		*/
+		auto *k_parent = &root;
+		auto *n_parent = &root;
+		auto kn = n;
+
+		while (!kn.is_leaf()) {
+			n_parent = k_parent;
+			n = kn;
+			k_parent = &kn.get_node()->child[slice_index(key, kn.get_node()->shift)];
+			kn = *k_parent;
+
+			if (!kn)
+				return false;
+		}
+
+		if (kn.get_leaf()->key != key)
+			return false;
+
+		obj::transaction::run(pop, [&]{
+			obj::delete_persistent<critnib_leaf>(kn.get_leaf());
+
+			n.get_node()->child[slice_index(key, n.get_node()->shift)] = nullptr;
+
+			/* Remove the node if there's only one remaining child. */
+			int ochild = -1;
+			for (int i = 0; i < SLNODES; i++) {
+				if (n.get_node()->child[i]) {
+					if (ochild != -1)
+						return;
+
+					ochild = i;
+				}
+			}
+
+			assert(ochild != -1);
+			*n_parent = n.get_node()->child[ochild];
+		});
+
+		return true;
+	}
+
 
 private:
 	tagged_node_ptr root;
@@ -335,87 +421,6 @@ private:
 		}
 	}
 };
-
-// /*
-//  * critnib_remove -- delete a key from the critnib structure, return its value
-//  */
-// void *
-// critnib_remove(struct critnib *c, uint64_t key)
-// {
-// 	struct critnib_leaf *k;
-// 	void *value = NULL;
-
-// 	util_mutex_lock(&c->mutex);
-
-// 	struct critnib_node *n = c->root;
-// 	if (!n)
-// 		goto not_found;
-
-// 	uint64_t del = util_fetch_and_add64(&c->remove_count, 1) % DELETED_LIFE;
-// 	free_node(c, c->pending_del_nodes[del]);
-// 	free_leaf(c, c->pending_del_leaves[del]);
-// 	c->pending_del_nodes[del] = NULL;
-// 	c->pending_del_leaves[del] = NULL;
-
-// 	if (is_leaf(n)) {
-// 		k = to_leaf(n);
-// 		if (k->key == key) {
-// 			store(&c->root, NULL);
-// 			goto del_leaf;
-// 		}
-
-// 		goto not_found;
-// 	}
-// 	/*
-// 	 * n and k are a parent:child pair (after the first iteration); k is the
-// 	 * leaf that holds the key we're deleting.
-// 	 */
-// 	struct critnib_node **k_parent = &c->root;
-// 	struct critnib_node **n_parent = &c->root;
-// 	struct critnib_node *kn = n;
-
-// 	while (!is_leaf(kn)) {
-// 		n_parent = k_parent;
-// 		n = kn;
-// 		k_parent = &kn->child[slice_index(key, kn->shift)];
-// 		kn = *k_parent;
-
-// 		if (!kn)
-// 			goto not_found;
-// 	}
-
-// 	k = to_leaf(kn);
-// 	if (k->key != key)
-// 		goto not_found;
-
-// 	store(&n->child[slice_index(key, n->shift)], NULL);
-
-// 	/* Remove the node if there's only one remaining child. */
-// 	int ochild = -1;
-// 	for (int i = 0; i < SLNODES; i++) {
-// 		if (n->child[i]) {
-// 			if (ochild != -1)
-// 				goto del_leaf;
-
-// 			ochild = i;
-// 		}
-// 	}
-
-// 	ASSERTne(ochild, -1);
-
-// 	store(n_parent, n->child[ochild]);
-// 	c->pending_del_nodes[del] = n;
-
-// del_leaf:
-// 	value = k->value;
-// 	c->pending_del_leaves[del] = k;
-
-// not_found:
-// 	util_mutex_unlock(&c->mutex);
-// 	return value;
-// }
-
-
 
 // /*
 //  * internal: find_successor -- return the rightmost non-null node in a subtree
@@ -532,8 +537,16 @@ private:
 
 class radix_tree : public pmemobj_engine_base<internal::radix_tree::pmem_radix> {
 public:
-	radix_tree(std::unique_ptr<internal::config> cfg);
-	~radix_tree();
+	radix_tree(std::unique_ptr<internal::config> cfg)
+	: pmemobj_engine_base(cfg)
+	{
+		Recover();
+	}
+
+	~radix_tree()
+	{
+
+	}
 
 	radix_tree(const radix_tree &) = delete;
 	radix_tree &operator=(const radix_tree &) = delete;
@@ -549,27 +562,58 @@ public:
 
 	status exists(string_view key) final
 	{
-		return tree->get(key) == nullptr ? status::NOT_FOUND : status::OK;
+		return tree->get(convert_to_uint64(key)) == nullptr ? status::NOT_FOUND : status::OK;
 	}
 
-	status get(string_view key, get_v_callback *callback, void *arg) final;
+	status get(string_view key, get_v_callback *callback, void *arg) final
+	{
+		auto *value = tree->get(convert_to_uint64(key));
+		if (!value)
+			return status::NOT_FOUND;
+			
+		callback(value->data(), value->size(), arg);
 
-	status put(string_view key, string_view value) final;
+		return status::OK;
+	}
 
-	status remove(string_view key) final;
+	status put(string_view key, string_view value) final
+	{
+		tree->insert(convert_to_uint64(key), value.data(), value.size());
 
-	status defrag(double start_percent, double amount_percent) final;
+		return status::OK;
+	}
+
+	status remove(string_view key) final
+	{
+		return tree->remove(convert_to_uint64(key)) ? status::OK : status::NOT_FOUND;
+	}
+
+	// status defrag(double start_percent, double amount_percent) final;
 
 private:
 	uint64_t convert_to_uint64(string_view v)
 	{
-		if (v.size() > 8)
+		if (v.size() > sizeof(uint64_t))
 			throw internal::invalid_argument("XXX");
 
-		return (uint64_t) v.data();
+		return *((uint64_t*)v.data());
 	}
 
-	void Recover();
+	void Recover()
+	{
+		if (!OID_IS_NULL(*root_oid)) {
+			tree = (pmem::kv::internal::radix_tree::pmem_radix *)pmemobj_direct(*root_oid);
+		} else {
+			pmem::obj::transaction::run(pmpool, [&] {
+				pmem::obj::transaction::snapshot(root_oid);
+				*root_oid =
+					pmem::obj::make_persistent<internal::radix_tree::pmem_radix>().raw();
+				tree = (pmem::kv::internal::radix_tree::pmem_radix *)pmemobj_direct(
+					*root_oid);
+			});
+		}
+	}
+
 	internal::radix_tree::pmem_radix *tree;
 };
 
