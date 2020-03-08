@@ -237,11 +237,12 @@ public:
 	{
 		auto pop = obj::pool_base(pmemobj_pool_by_ptr(this));
 
-		obj::transaction::run(pop, [&]{
 			auto n = root;
 			if (!n) {
-				root = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
-				return;
+				obj::transaction::run(pop, [&]{
+					root = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+				});
+				return 0;
 			}
 
 			auto *parent = &root;
@@ -255,8 +256,10 @@ public:
 
 			if (!n) {
 				n = prev;
-				n.get_node()->child[slice_index(key, n.get_node()->shift)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
-				return;
+				obj::transaction::run(pop, [&]{
+					n.get_node()->child[slice_index(key, n.get_node()->shift)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+				});
+				return 0;
 			}
 
 			uint64_t path = n.is_leaf() ? n.get_leaf()->key : n.get_node()->path;
@@ -266,7 +269,7 @@ public:
 				assert(n.is_leaf());
 				n.get_leaf()->value.assign(std::forward<Args>(args)...);
 
-				return;
+				return 0;
 				// XXX - what should be the strategy?
 				// obj::delete_persistent<critnib_leaf>(leaf_ptr);
 				// return EEXIST;
@@ -274,8 +277,9 @@ public:
 
 			/* and convert that to an index. */
 			sh_t sh = util_mssb_index64(at) & (sh_t)~(SLICE - 1);
-			auto m = obj::make_persistent<critnib_node>();
 
+		obj::transaction::run(pop, [&]{
+			auto m = obj::make_persistent<critnib_node>();
 			m->child[slice_index(key, sh)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
 			m->child[slice_index(path, sh)] = n;
 			m->shift = sh;
