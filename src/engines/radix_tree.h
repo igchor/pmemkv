@@ -206,7 +206,8 @@ struct critnib_leaf {
 	}
 
 	obj::p<uint64_t> key;
-	obj::string value;
+	void *value;
+	//obj::string value;
 };
 
 class pmem_radix {
@@ -231,16 +232,15 @@ public:
 	*
 	* Takes a global write lock but doesn't stall any readers.
 	*/
-	template <typename... Args>
 	int
-	insert(uint64_t key, Args &&... args)
+	insert(uint64_t key, void* value)
 	{
 		auto pop = obj::pool_base(pmemobj_pool_by_ptr(this));
 
 			auto n = root;
 			if (!n) {
 				obj::transaction::run(pop, [&]{
-					root = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+					root = obj::make_persistent<critnib_leaf>(key, value);;
 				});
 				return 0;
 			}
@@ -257,7 +257,7 @@ public:
 			if (!n) {
 				n = prev;
 				obj::transaction::run(pop, [&]{
-					n.get_node()->child[slice_index(key, n.get_node()->shift)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+					n.get_node()->child[slice_index(key, n.get_node()->shift)] = obj::make_persistent<critnib_leaf>(key, value);;
 				});
 				return 0;
 			}
@@ -267,7 +267,7 @@ public:
 			uint64_t at = path ^ key;
 			if (!at) {
 				assert(n.is_leaf());
-				n.get_leaf()->value.assign(std::forward<Args>(args)...);
+				n.get_leaf()->value = value;
 
 				return 0;
 				// XXX - what should be the strategy?
@@ -280,7 +280,7 @@ public:
 
 		obj::transaction::run(pop, [&]{
 			auto m = obj::make_persistent<critnib_node>();
-			m->child[slice_index(key, sh)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+			m->child[slice_index(key, sh)] = obj::make_persistent<critnib_leaf>(key, value);;
 			m->child[slice_index(path, sh)] = n;
 			m->shift = sh;
 			m->path = key & path_mask(sh);
@@ -300,7 +300,7 @@ public:
 	* Counterintuitively, it's pointless to return the most current answer,
 	* we need only one that was valid at any point after the call started.
 	*/
-	obj::string*
+	void*
 	get(uint64_t key)
 	{
 			auto n = root;
@@ -575,14 +575,14 @@ public:
 		if (!value)
 			return status::NOT_FOUND;
 			
-		callback(value->data(), value->size(), arg);
+		callback((const char*)value, 8, arg);
 
 		return status::OK;
 	}
 
 	status put(string_view key, string_view value) final
 	{
-		tree->insert(convert_to_uint64(key), value.data(), value.size());
+		tree->insert(convert_to_uint64(key), (void*)value.data());
 
 		return status::OK;
 	}
