@@ -104,7 +104,7 @@ namespace radix_tree
  */
 #define DELETED_LIFE 16
 
-#define SLICE 4
+#define SLICE 8
 #define NIB ((1ULL << SLICE) - 1)
 #define SLNODES (1 << SLICE)
 
@@ -200,13 +200,20 @@ struct critnib_node {
 
 struct critnib_leaf {
 	template <typename... Args>
-	critnib_leaf(uint64_t key, Args &&... args): 
-		key(key), value(std::forward<Args>(args)...)
+	critnib_leaf(uint64_t key, const char *value, std::size_t value_size): 
+		key(key)
 	{
+		memcpy(this->value(), value, value_size);
+		v_size = value_size;
+	}
+
+	char *value()
+	{
+		return reinterpret_cast<char*>(this + 1);
 	}
 
 	obj::p<uint64_t> key;
-	obj::string value;
+	obj::p<uint64_t> v_size;
 };
 
 class pmem_radix {
@@ -221,6 +228,15 @@ public:
 			delete_node(root);
 	}
 
+	obj::persistent_ptr<critnib_leaf> make_leaf(uint64_t key, const char *value, std::size_t v_size)
+	{
+		obj::persistent_ptr<critnib_leaf> ret = pmemobj_tx_alloc(sizeof(critnib_leaf) + v_size * sizeof(char), 0);
+		
+		new (ret.get()) critnib_leaf(key, value, v_size);
+
+		return ret;
+	}
+
 	/*
 	* crinib_insert -- write a key:value pair to the critnib structure
 	*
@@ -231,16 +247,15 @@ public:
 	*
 	* Takes a global write lock but doesn't stall any readers.
 	*/
-	template <typename... Args>
 	int
-	insert(uint64_t key, Args &&... args)
+	insert(uint64_t key, const char *value, std::size_t v_size)
 	{
 		auto pop = obj::pool_base(pmemobj_pool_by_ptr(this));
 
 			auto n = root;
 			if (!n) {
 				obj::transaction::run(pop, [&]{
-					root = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+					root = make_leaf(key, value, v_size);;
 				});
 				return 0;
 			}
@@ -257,7 +272,7 @@ public:
 			if (!n) {
 				n = prev;
 				obj::transaction::run(pop, [&]{
-					n.get_node()->child[slice_index(key, n.get_node()->shift)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+					n.get_node()->child[slice_index(key, n.get_node()->shift)] = make_leaf(key, value, v_size);;
 				});
 				return 0;
 			}
@@ -267,7 +282,18 @@ public:
 			uint64_t at = path ^ key;
 			if (!at) {
 				assert(n.is_leaf());
-				n.get_leaf()->value.assign(std::forward<Args>(args)...);
+				
+				obj::transaction::run(pop, [&]{
+					if (v_size <= n.get_leaf()->v_size) {
+						pmemobj_tx_add_range_direct(&n.get_leaf()->v_size, n.get_leaf()->v_size + sizeof(uint64_t));
+						memcpy(n.get_leaf()->value(), value, v_size);
+						n.get_leaf()->v_size = v_size;
+					} else {
+						//auto new_node = make_leaf(key, value, v_size);
+						throw std::runtime_error("Not supported");
+					}
+				});
+				//n.get_leaf()->value.assign(std::forward<Args>(args)...);
 
 				return 0;
 				// XXX - what should be the strategy?
@@ -280,7 +306,7 @@ public:
 
 		obj::transaction::run(pop, [&]{
 			auto m = obj::make_persistent<critnib_node>();
-			m->child[slice_index(key, sh)] = obj::make_persistent<critnib_leaf>(key, std::forward<Args>(args)...);;
+			m->child[slice_index(key, sh)] = make_leaf(key, value, v_size);;
 			m->child[slice_index(path, sh)] = n;
 			m->shift = sh;
 			m->path = key & path_mask(sh);
@@ -300,7 +326,7 @@ public:
 	* Counterintuitively, it's pointless to return the most current answer,
 	* we need only one that was valid at any point after the call started.
 	*/
-	obj::string*
+	std::pair<const char*, std::size_t>
 	get(uint64_t key)
 	{
 			auto n = root;
@@ -313,7 +339,9 @@ public:
 			while (n && !n.is_leaf())
 				n = n.get_node()->child[slice_index(key, n.get_node()->shift)];
 
-			return (n && n.get_leaf()->key == key) ? &n.get_leaf()->value : nullptr;
+			return (n && n.get_leaf()->key == key) ? 
+				std::pair<const char*, std::size_t>{n.get_leaf()->value(), n.get_leaf()->v_size} :
+				std::pair<const char*, std::size_t>{nullptr, 0};
 	}
 
 	/*
@@ -566,16 +594,16 @@ public:
 
 	status exists(string_view key) final
 	{
-		return tree->get(convert_to_uint64(key)) == nullptr ? status::NOT_FOUND : status::OK;
+		return tree->get(convert_to_uint64(key)).first == nullptr ? status::NOT_FOUND : status::OK;
 	}
 
 	status get(string_view key, get_v_callback *callback, void *arg) final
 	{
-		auto *value = tree->get(convert_to_uint64(key));
-		if (!value)
+		auto value = tree->get(convert_to_uint64(key));
+		if (!value.first)
 			return status::NOT_FOUND;
 			
-		callback(value->data(), value->size(), arg);
+		callback(value.first, value.second, arg);
 
 		return status::OK;
 	}
