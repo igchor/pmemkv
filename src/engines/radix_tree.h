@@ -248,9 +248,9 @@ public:
 	* Takes a global write lock but doesn't stall any readers.
 	*/
 	int
-	insert(uint64_t key, const char *value, std::size_t v_size)
+	insert(obj::pool_base &pop, uint64_t key, const char *value, std::size_t v_size)
 	{
-		auto pop = obj::pool_base(pmemobj_pool_by_ptr(this));
+	//	auto pop = obj::pool_base(pmemobj_pool_by_ptr(this));
 
 			auto n = root;
 			if (!n) {
@@ -610,7 +610,7 @@ public:
 
 	status put(string_view key, string_view value) final
 	{
-		tree->insert(convert_to_uint64(key), value.data(), value.size());
+		tree->insert(pmpool, convert_to_uint64(key), value.data(), value.size());
 
 		return status::OK;
 	}
