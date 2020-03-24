@@ -48,6 +48,63 @@ namespace internal
 namespace radix_tree
 {
 
+struct tagged_node_ptr;
+}
+}
+}
+}
+
+namespace pmem {
+namespace obj {
+	template <>
+	struct check_if_on_pmem<uint64_t>
+	{
+		static constexpr bool value = false;
+	};
+
+	template <>
+	struct check_if_on_pmem<p<uint64_t>>
+	{
+		static constexpr bool value = false;
+	};
+
+
+	template <>
+	struct check_if_on_pmem<unsigned char>
+	{
+		static constexpr bool value = false;
+	};
+
+	template <>
+	struct check_if_on_pmem<p<unsigned char>>
+	{
+		static constexpr bool value = false;
+	};
+
+	template <>
+	struct check_if_on_pmem<pmem::kv::internal::radix_tree::tagged_node_ptr>
+	{
+		static constexpr bool value = false;
+	};
+
+	template <>
+	struct check_if_on_pmem<persistent_ptr_base>
+	{
+		static constexpr bool value = false;
+	};
+}
+}
+
+
+namespace pmem
+{
+namespace kv
+{
+namespace internal
+{
+namespace radix_tree
+{
+
 /*
  * STRUCTURE DESCRIPTION
  *
@@ -109,6 +166,8 @@ namespace radix_tree
 #define SLNODES (1 << SLICE)
 
 typedef unsigned char sh_t;
+
+#include <libpmemobj++/detail/common.hpp>
 
 // template <typename T>
 // struct self_relative_pointer
@@ -198,6 +257,10 @@ struct critnib_node {
 	obj::p<sh_t> shift;
 };
 
+struct critnib_node_pmem : public critnib_node {
+
+};
+
 struct critnib_leaf {
 	template <typename... Args>
 	critnib_leaf(uint64_t key, const char *value, std::size_t value_size): 
@@ -215,6 +278,11 @@ struct critnib_leaf {
 	obj::p<uint64_t> key;
 	obj::p<uint64_t> v_size;
 };
+
+struct critnib_leaf_pmem : public critnib_leaf {
+
+};
+
 
 class pmem_radix {
 public:
@@ -651,3 +719,4 @@ private:
 
 } /* namespace kv */
 } /* namespace pmem */
+
