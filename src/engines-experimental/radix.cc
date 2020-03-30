@@ -68,6 +68,7 @@ char *tree::leaf::data()
 tree::tree()
 {
 	size_ = 0;
+	pool_id = pmemobj_oid(this).pool_uuid_lo;
 }
 
 tree::~tree()
@@ -93,34 +94,34 @@ void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 	auto prev = root;
 
 	while (n && !n.is_leaf() &&
-	       (key & path_mask(n.get_node()->shift)) == n.get_node()->path) {
+	       (key & path_mask(n.get_node(pool_id)->shift)) == n.get_node(pool_id)->path) {
 		prev = n;
-		parent = &n.get_node()->child[slice_index(key, n.get_node()->shift)];
+		parent = &n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)];
 		n = *parent;
 	}
 
 	if (!n) {
 		obj::transaction::run(pop, [&] {
-			prev.get_node()->child[slice_index(key, prev.get_node()->shift)] =
+			prev.get_node(pool_id)->child[slice_index(key, prev.get_node(pool_id)->shift)] =
 				make_leaf(key, value);
 		});
 		return;
 	}
 
-	uint64_t path = n.is_leaf() ? n.get_leaf()->key : n.get_node()->path;
+	uint64_t path = n.is_leaf() ? n.get_leaf(pool_id)->key : n.get_node(pool_id)->path;
 	/* Find where the path differs from our key. */
 	uint64_t at = path ^ key;
 	if (!at) {
 		assert(n.is_leaf());
 
 		obj::transaction::run(pop, [&] {
-			if (value.size() <= n.get_leaf()->capacity()) {
+			if (value.size() <= n.get_leaf(pool_id)->capacity()) {
 				/* Just reuse existing memory */
-				n.get_leaf()->assign(value);
+				n.get_leaf(pool_id)->assign(value);
 			} else {
 				/* Allocate new, bigger node and free the old one */
-				prev.get_node()->child[slice_index(
-					key, prev.get_node()->shift)] =
+				prev.get_node(pool_id)->child[slice_index(
+					key, prev.get_node(pool_id)->shift)] =
 					make_leaf(key, value);
 
 				delete_node(n);
@@ -153,10 +154,10 @@ string_view tree::get(uint64_t key)
 	 * going wrong way if our path is missing, but that's ok...
 	 */
 	while (n && !n.is_leaf())
-		n = n.get_node()->child[slice_index(key, n.get_node()->shift)];
+		n = n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)];
 
-	if (n && n.get_leaf()->key == key)
-		return string_view(n.get_leaf()->cdata(), n.get_leaf()->value_size);
+	if (n && n.get_leaf(pool_id)->key == key)
+		return string_view(n.get_leaf(pool_id)->cdata(), n.get_leaf(pool_id)->value_size);
 	else
 		throw std::out_of_range("No such key"); // XXX return this info?
 }
@@ -168,7 +169,7 @@ bool tree::remove(obj::pool_base &pop, uint64_t key)
 		return false;
 
 	if (n.is_leaf()) {
-		if (n.get_leaf()->key == key) {
+		if (n.get_leaf(pool_id)->key == key) {
 			obj::transaction::run(pop, [&] {
 				root = nullptr;
 				delete_node(n);
@@ -191,25 +192,25 @@ bool tree::remove(obj::pool_base &pop, uint64_t key)
 	while (!kn.is_leaf()) {
 		n_parent = k_parent;
 		n = kn;
-		k_parent = &kn.get_node()->child[slice_index(key, kn.get_node()->shift)];
+		k_parent = &kn.get_node(pool_id)->child[slice_index(key, kn.get_node(pool_id)->shift)];
 		kn = *k_parent;
 
 		if (!kn)
 			return false;
 	}
 
-	if (kn.get_leaf()->key != key)
+	if (kn.get_leaf(pool_id)->key != key)
 		return false;
 
 	obj::transaction::run(pop, [&] {
 		delete_node(kn);
 
-		n.get_node()->child[slice_index(key, n.get_node()->shift)] = nullptr;
+		n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)] = nullptr;
 
 		/* Remove the node if there's only one remaining child. */
 		int ochild = -1;
 		for (int i = 0; i < (int)SLNODES; i++) {
-			if (n.get_node()->child[i]) {
+			if (n.get_node(pool_id)->child[i]) {
 				if (ochild != -1)
 					return;
 
@@ -219,8 +220,8 @@ bool tree::remove(obj::pool_base &pop, uint64_t key)
 
 		assert(ochild != -1);
 
-		*n_parent = n.get_node()->child[ochild];
-		obj::delete_persistent<tree::node>(n.get_node());
+		*n_parent = n.get_node(pool_id)->child[ochild];
+		obj::delete_persistent<tree::node>(n.get_node(pool_id));
 	});
 
 	return true;
@@ -231,12 +232,12 @@ void tree::iterate_rec(tree::tagged_node_ptr n, pmemkv_get_kv_callback *callback
 {
 	if (!n.is_leaf()) {
 		for (int i = 0; i < (int)SLNODES; i++) {
-			if (n.get_node()->child[i])
-				iterate_rec(n.get_node()->child[i], callback,
+			if (n.get_node(pool_id)->child[i])
+				iterate_rec(n.get_node(pool_id)->child[i], callback,
 					    arg); // XXX - get rid of recursion
 		}
 	} else {
-		auto leaf = n.get_leaf();
+		auto leaf = n.get_leaf(pool_id);
 		callback((const char *)&leaf->key, sizeof(leaf->key), leaf->cdata(),
 			 leaf->value_size, arg);
 	}
@@ -264,15 +265,15 @@ void tree::delete_node(tree::tagged_node_ptr n)
 
 	if (!n.is_leaf()) {
 		for (int i = 0; i < (int)SLNODES; i++) {
-			if (n.get_node()->child[i])
+			if (n.get_node(pool_id)->child[i])
 				delete_node(
-					n.get_node()
+					n.get_node(pool_id)
 						->child[i]); // XXX - get rid of recursion
 		}
-		obj::delete_persistent<tree::node>(n.get_node());
+		obj::delete_persistent<tree::node>(n.get_node(pool_id));
 	} else {
 		size_--;
-		obj::delete_persistent<tree::leaf>(n.get_leaf());
+		obj::delete_persistent<tree::leaf>(n.get_leaf(pool_id));
 	}
 }
 
@@ -290,61 +291,72 @@ obj::persistent_ptr<tree::leaf> tree::make_leaf(uint64_t key, string_view value)
 	return leaf_ptr;
 }
 
-tree::tagged_node_ptr::tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr)
-    : obj::persistent_ptr_base({ptr.raw().pool_uuid_lo, ptr.raw().off | 1})
+tree::tagged_node_ptr::tagged_node_ptr()
 {
+	off = 0;
+}
+
+tree::tagged_node_ptr::tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr)
+{
+	off = ptr.raw().off | 1;
 }
 
 tree::tagged_node_ptr::tagged_node_ptr(const obj::persistent_ptr<node> &ptr)
-    : obj::persistent_ptr_base(ptr)
 {
+	off = ptr.raw().off;
+}
+
+tree::tagged_node_ptr::tagged_node_ptr(const tree::tagged_node_ptr &rhs)
+{
+	off = rhs.off;
 }
 
 tree::tagged_node_ptr &tree::tagged_node_ptr::operator=(const tree::tagged_node_ptr &rhs)
 {
-	obj::persistent_ptr_base::operator=(
-		static_cast<const obj::persistent_ptr_base &>(rhs));
+	off = rhs.off;
 	return *this;
 }
 
 tree::tagged_node_ptr &tree::tagged_node_ptr::operator=(std::nullptr_t)
 {
-	obj::persistent_ptr_base::operator=(nullptr);
+	off = 0;
 	return *this;
 }
 
 tree::tagged_node_ptr &
 tree::tagged_node_ptr::operator=(const obj::persistent_ptr<leaf> &rhs)
 {
-	return this->operator=(tagged_node_ptr(rhs));
+	off = rhs.raw().off | 1;
+	return *this;
 }
 
 tree::tagged_node_ptr &
 tree::tagged_node_ptr::operator=(const obj::persistent_ptr<node> &rhs)
 {
-	return this->operator=(tagged_node_ptr(rhs));
+	off = rhs.raw().off;
+	return *this;
 }
 
-bool tree::tagged_node_ptr::is_leaf()
+bool tree::tagged_node_ptr::is_leaf() const
 {
-	return raw().off & 1;
+	return off & 1;
 }
 
-obj::persistent_ptr<tree::leaf> tree::tagged_node_ptr::get_leaf()
+tree::leaf *tree::tagged_node_ptr::get_leaf(uint64_t pool_id) const
 {
 	assert(is_leaf());
-	return obj::persistent_ptr<leaf>({raw().pool_uuid_lo, raw().off & ~1ULL});
+	return (tree::leaf *) pmemobj_direct({pool_id, off & ~1ULL});
 }
 
-obj::persistent_ptr<tree::node> tree::tagged_node_ptr::get_node()
+tree::node *tree::tagged_node_ptr::get_node(uint64_t pool_id) const
 {
 	assert(!is_leaf());
-	return obj::persistent_ptr<node>(raw());
+	return (tree::node *) pmemobj_direct({pool_id, off});
 }
 
 tree::tagged_node_ptr::operator bool() const noexcept
 {
-	return oid.off != 0;
+	return off != 0;
 }
 
 } // namespace radix

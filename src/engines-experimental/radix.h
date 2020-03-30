@@ -73,10 +73,14 @@ private:
 	struct leaf;
 	struct node;
 
-	struct tagged_node_ptr : public obj::persistent_ptr_base {
-		tagged_node_ptr() = default;
+	struct tagged_node_ptr {
+		tagged_node_ptr();
+		tagged_node_ptr(const tagged_node_ptr &rhs);
 		tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr);
 		tagged_node_ptr(const obj::persistent_ptr<node> &ptr);
+
+		tagged_node_ptr(tagged_node_ptr &&rhs) = delete;
+		tagged_node_ptr &operator=(tagged_node_ptr &&rhs) = delete;
 
 		tagged_node_ptr &operator=(const tagged_node_ptr &rhs);
 
@@ -85,12 +89,15 @@ private:
 		tagged_node_ptr &operator=(const obj::persistent_ptr<leaf> &rhs);
 		tagged_node_ptr &operator=(const obj::persistent_ptr<node> &rhs);
 
-		bool is_leaf();
+		bool is_leaf() const;
 
-		obj::persistent_ptr<leaf> get_leaf();
-		obj::persistent_ptr<node> get_node();
+		tree::leaf *get_leaf(uint64_t) const;
+		tree::node *get_node(uint64_t) const;
 
 		explicit operator bool() const noexcept;
+
+	private:
+		obj::p<uint64_t> off;
 	};
 
 	struct node {
@@ -125,7 +132,7 @@ private:
 		std::size_t capacity();
 
 		obj::p<uint64_t> key;
-		obj::p<uint64_t> value_size;
+		obj::p<uint64_t> value_size ;
 
 	private:
 		char *data();
@@ -133,6 +140,7 @@ private:
 
 	tagged_node_ptr root;
 	obj::p<uint64_t> size_;
+	uint64_t pool_id = 0;
 
 	/*
 	 * internal: path_mask -- return bit mask of a path above a subtree [shift]
