@@ -441,7 +441,10 @@ uint64_t radix::key_to_uint64(string_view v)
 	if (v.size() > sizeof(uint64_t))
 		throw internal::invalid_argument("Key length must be <= 8");
 
-	return *((uint64_t *)v.data());
+	uint64_t val = 0;
+	memcpy(&val, v.data(), v.size());
+
+	return val;
 }
 
 } // namespace kv
