@@ -841,6 +841,11 @@ endif(ENGINE_STREE)
 			TRACERS none #memcheck
 			SCRIPT pmemobj_based/pmemobj/error_handling_create.cmake)
 
+			add_engine_test(ENGINE radix
+			BINARY concurrent_put_get_remove
+			TRACERS none #memcheck
+			SCRIPT pmemobj_based/default.cmake)
+
 	# # XXX - defrag not supported
 	# # add_engine_test(ENGINE stree
 	# # BINARY pmemobj_error_handling_tx_oid
