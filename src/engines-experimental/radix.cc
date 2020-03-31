@@ -9,6 +9,8 @@
 #include <libpmemobj++/pext.hpp>
 #include <libpmemobj++/transaction.hpp>
 
+#include <mutex>
+
 namespace pmem
 {
 namespace kv
@@ -84,14 +86,21 @@ uint64_t tree::size()
 
 void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 {
-	auto n = root;
+restart:
+{
+	auto n = root.load();
 	if (!n) {
-		obj::transaction::run(pop, [&] { root = make_leaf(key, value); });
+		std::unique_lock<obj::mutex> lock(root_mtx);
+
+		if (n.get() != root.load().get())
+			goto restart;
+
+		obj::transaction::run(pop, [&] { root.store(make_leaf(key, value)); });
 		return;
 	}
 
+	auto prev = root.load();
 	auto *parent = &root;
-	auto prev = root;
 
 	while (n && !n.is_leaf() &&
 	       (key & path_mask(n.get_node(pool_id)->shift)) == n.get_node(pool_id)->path) {
@@ -100,10 +109,16 @@ void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 		n = *parent;
 	}
 
+	auto *mtx = parent == &root ? &root_mtx : &prev.get_node(pool_id)->mtx;
+
 	if (!n) {
+		std::unique_lock<obj::mutex> lock(*mtx);
+
+		if (parent->load().get() != n.get())
+				goto restart;
+
 		obj::transaction::run(pop, [&] {
-			prev.get_node(pool_id)->child[slice_index(key, prev.get_node(pool_id)->shift)] =
-				make_leaf(key, value);
+			parent->store(make_leaf(key, value));
 		});
 		return;
 	}
@@ -114,19 +129,17 @@ void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 	if (!at) {
 		assert(n.is_leaf());
 
-		obj::transaction::run(pop, [&] {
-			if (value.size() <= n.get_leaf(pool_id)->capacity()) {
-				/* Just reuse existing memory */
-				n.get_leaf(pool_id)->assign(value);
-			} else {
-				/* Allocate new, bigger node and free the old one */
-				prev.get_node(pool_id)->child[slice_index(
-					key, prev.get_node(pool_id)->shift)] =
-					make_leaf(key, value);
+		std::unique_lock<obj::mutex> lock(*mtx);
 
-				delete_node(n);
-			}
-		});
+		// XXX here and in other places - chcek for obsolete flag
+		// because parent itself could have been unpinned
+		if (parent->load().get() != n.get())
+			goto restart;
+
+		obj::transaction::run(pop, [&] {
+			parent->store(make_leaf(key, value));
+			delete_node(n);
+		});	
 
 		return;
 	}
@@ -134,14 +147,20 @@ void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 	/* and convert that to an index. */
 	sh_t sh = util_mssb_index64(at) & (sh_t) ~(SLICE - 1);
 
+	std::unique_lock<obj::mutex> lock(*mtx);
+
+	if (parent->load().get() != n.get())
+		goto restart;
+
 	obj::transaction::run(pop, [&] {
 		auto m = obj::make_persistent<node>();
 		m->child[slice_index(key, sh)] = make_leaf(key, value);
 		m->child[slice_index(path, sh)] = n;
 		m->shift = sh;
 		m->path = key & path_mask(sh);
-		*parent = m;
+		parent->store(m);
 	});
+}
 }
 
 string_view tree::get(uint64_t key)
@@ -154,7 +173,7 @@ string_view tree::get(uint64_t key)
 	 * going wrong way if our path is missing, but that's ok...
 	 */
 	while (n && !n.is_leaf())
-		n = n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)];
+		n = n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)].load();
 
 	if (n && n.get_leaf(pool_id)->key == key)
 		return string_view(n.get_leaf(pool_id)->cdata(), n.get_leaf(pool_id)->value_size);
@@ -308,12 +327,12 @@ tree::tagged_node_ptr::tagged_node_ptr(const obj::persistent_ptr<node> &ptr)
 
 tree::tagged_node_ptr::tagged_node_ptr(const tree::tagged_node_ptr &rhs)
 {
-	off = rhs.off;
+	off = rhs.off.load(std::memory_order_relaxed);
 }
 
 tree::tagged_node_ptr &tree::tagged_node_ptr::operator=(const tree::tagged_node_ptr &rhs)
 {
-	off = rhs.off;
+	off = rhs.off.load(std::memory_order_relaxed);
 	return *this;
 }
 
@@ -339,24 +358,24 @@ tree::tagged_node_ptr::operator=(const obj::persistent_ptr<node> &rhs)
 
 bool tree::tagged_node_ptr::is_leaf() const
 {
-	return off & 1;
+	return off.load(std::memory_order_acquire) & 1;
 }
 
 tree::leaf *tree::tagged_node_ptr::get_leaf(uint64_t pool_id) const
 {
 	assert(is_leaf());
-	return (tree::leaf *) pmemobj_direct({pool_id, off & ~1ULL});
+	return (tree::leaf *) pmemobj_direct({pool_id,  off.load(std::memory_order_acquire) & ~1ULL});
 }
 
 tree::node *tree::tagged_node_ptr::get_node(uint64_t pool_id) const
 {
 	assert(!is_leaf());
-	return (tree::node *) pmemobj_direct({pool_id, off});
+	return (tree::node *) pmemobj_direct({pool_id,  off.load(std::memory_order_acquire)});
 }
 
 tree::tagged_node_ptr::operator bool() const noexcept
 {
-	return off != 0;
+	return off.load(std::memory_order_acquire) != 0;
 }
 
 } // namespace radix

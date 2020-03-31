@@ -7,6 +7,9 @@
 #include <libpmemobj++/persistent_ptr.hpp>
 #include <libpmemobj++/pool.hpp>
 
+#include <libpmemobj++/mutex.hpp>
+#include <atomic>
+
 namespace pmem
 {
 namespace kv
@@ -75,12 +78,16 @@ private:
 
 	struct tagged_node_ptr {
 		tagged_node_ptr();
+		tagged_node_ptr(uint64_t off)
+		{
+			this->off = off;
+		}
 		tagged_node_ptr(const tagged_node_ptr &rhs);
 		tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr);
 		tagged_node_ptr(const obj::persistent_ptr<node> &ptr);
 
-		tagged_node_ptr(tagged_node_ptr &&rhs) = delete;
-		tagged_node_ptr &operator=(tagged_node_ptr &&rhs) = delete;
+		tagged_node_ptr(tagged_node_ptr &&rhs) = default;
+		tagged_node_ptr &operator=(tagged_node_ptr &&rhs) = default;
 
 		tagged_node_ptr &operator=(const tagged_node_ptr &rhs);
 
@@ -94,10 +101,26 @@ private:
 		tree::leaf *get_leaf(uint64_t) const;
 		tree::node *get_node(uint64_t) const;
 
+		tagged_node_ptr load()
+		{
+			return tagged_node_ptr(off.load(std::memory_order_acquire));
+		}
+
+		void store(tagged_node_ptr ptr)
+		{
+			this->off.store(ptr.off.load(std::memory_order_relaxed), std::memory_order_release);
+		}
+
+		uint64_t get()
+		{
+			return off.load(std::memory_order_relaxed);
+		}
+
 		explicit operator bool() const noexcept;
 
 	private:
-		obj::p<uint64_t> off;
+		//obj::p<std::atomic<uint64_t>> off;
+		std::atomic<uint64_t> off;
 	};
 
 	struct node {
@@ -116,6 +139,7 @@ private:
 		 *              +-----+
 		 *               shift
 		 */
+		obj::mutex mtx;
 		tagged_node_ptr child[SLNODES];
 		obj::p<uint64_t> path;
 		obj::p<sh_t> shift;
@@ -138,6 +162,7 @@ private:
 		char *data();
 	};
 
+	obj::mutex root_mtx;
 	tagged_node_ptr root;
 	obj::p<uint64_t> size_;
 	uint64_t pool_id = 0;
