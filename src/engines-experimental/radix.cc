@@ -9,7 +9,10 @@
 #include <libpmemobj++/pext.hpp>
 #include <libpmemobj++/transaction.hpp>
 
+#include <libpmemobj/action_base.h>
+
 #include <mutex>
+#include <vector>
 
 namespace pmem
 {
@@ -32,15 +35,6 @@ tree::leaf::leaf(uint64_t key, string_view value) : key(key), value_size(value.s
 	std::memcpy(this->data(), value.data(), value.size());
 }
 
-void tree::leaf::assign(string_view value)
-{
-	assert(value.size() <= capacity());
-	assert(pmemobj_tx_stage() == TX_STAGE_WORK);
-
-	std::memcpy(data(), value.data(), value.size());
-	value_size = value.size();
-}
-
 const char *tree::leaf::data() const noexcept
 {
 	return reinterpret_cast<const char *>(this + 1);
@@ -58,11 +52,7 @@ std::size_t tree::leaf::capacity()
 
 char *tree::leaf::data()
 {
-	assert(pmemobj_tx_stage() == TX_STAGE_WORK);
-
 	auto *ptr = reinterpret_cast<char *>(this + 1);
-
-	obj::transaction::snapshot(ptr, value_size);
 
 	return ptr;
 }
@@ -84,10 +74,50 @@ uint64_t tree::size()
 	return this->size_;
 }
 
+struct actions
+{
+	actions(obj::pool_base pop, uint64_t pool_id) : pop(pop), pool_id(pool_id)
+	{
+		acts.reserve(4);
+	}
+
+	void set(uint64_t *what, uint64_t how)
+	{
+		acts.emplace_back();
+		pmemobj_set_value(pop.handle(), &acts.back(), what, how);
+	}
+
+	void free(uint64_t off)
+	{
+		acts.emplace_back();
+		pmemobj_defer_free(pop.handle(), PMEMoid{pool_id, off}, &acts.back());
+	}
+
+	PMEMoid alloc(uint64_t size)
+	{
+		acts.emplace_back();
+		return pmemobj_reserve(pop.handle(), &acts.back(), size, 0);
+	}
+
+	void publish()
+	{
+		std::atomic_thread_fence(std::memory_order_release);
+
+		if(pmemobj_publish(pop.handle(), acts.data(), acts.size()))
+			throw std::runtime_error("XXX");
+	}
+
+private:
+	std::vector<pobj_action> acts;
+	obj::pool_base pop;
+	uint64_t pool_id;
+};
+
 void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 {
-restart:
-{
+restart : {
+	actions acts(pop, pool_id);
+
 	auto n = root.load();
 	if (!n) {
 		std::unique_lock<obj::mutex> lock(root_mtx);
@@ -95,7 +125,13 @@ restart:
 		if (n.get() != root.load().get())
 			goto restart;
 
-		obj::transaction::run(pop, [&] { root.store(make_leaf(key, value)); });
+		auto oid = acts.alloc(sizeof(tree::leaf) + value.size());
+		new (pmemobj_direct(oid)) tree::leaf(key, value);
+		size_++;
+
+		acts.set((uint64_t*)&root, oid.off | 1);
+		acts.publish();
+
 		return;
 	}
 
@@ -103,10 +139,12 @@ restart:
 	auto *parent = &root;
 
 	while (n && !n.is_leaf() &&
-	       (key & path_mask(n.get_node(pool_id)->shift)) == n.get_node(pool_id)->path) {
+	       (key & path_mask(n.get_node(pool_id)->shift)) ==
+		       n.get_node(pool_id)->path) {
 		prev = n;
-		parent = &n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)];
-		n = *parent;
+		parent = &n.get_node(pool_id)
+				  ->child[slice_index(key, n.get_node(pool_id)->shift)];
+		n = parent->load();
 	}
 
 	auto *mtx = parent == &root ? &root_mtx : &prev.get_node(pool_id)->mtx;
@@ -115,15 +153,20 @@ restart:
 		std::unique_lock<obj::mutex> lock(*mtx);
 
 		if (parent->load().get() != n.get())
-				goto restart;
+			goto restart;
 
-		obj::transaction::run(pop, [&] {
-			parent->store(make_leaf(key, value));
-		});
+		auto oid = acts.alloc(sizeof(tree::leaf) + value.size());
+		new (pmemobj_direct(oid)) tree::leaf(key, value);
+		size_++;
+		
+		acts.set((uint64_t*)parent, oid.off | 1);
+		acts.publish();
+
 		return;
 	}
 
-	uint64_t path = n.is_leaf() ? n.get_leaf(pool_id)->key : n.get_node(pool_id)->path;
+	uint64_t path =
+		n.is_leaf() ? n.get_leaf(pool_id)->key : n.get_node(pool_id)->path;
 	/* Find where the path differs from our key. */
 	uint64_t at = path ^ key;
 	if (!at) {
@@ -136,10 +179,12 @@ restart:
 		if (parent->load().get() != n.get())
 			goto restart;
 
-		obj::transaction::run(pop, [&] {
-			parent->store(make_leaf(key, value));
-			delete_node(n);
-		});	
+		auto oid = acts.alloc(sizeof(tree::leaf) + value.size());
+		new (pmemobj_direct(oid)) tree::leaf(key, value);
+		acts.set((uint64_t*)parent, oid.off | 1);
+		acts.free(n.get());
+
+		acts.publish();
 
 		return;
 	}
@@ -152,14 +197,21 @@ restart:
 	if (parent->load().get() != n.get())
 		goto restart;
 
-	obj::transaction::run(pop, [&] {
-		auto m = obj::make_persistent<node>();
-		m->child[slice_index(key, sh)] = make_leaf(key, value);
-		m->child[slice_index(path, sh)] = n;
-		m->shift = sh;
-		m->path = key & path_mask(sh);
-		parent->store(m);
-	});
+	auto node_oid = acts.alloc(sizeof(tree::node));
+	auto node_ptr = (tree::node*) pmemobj_direct(node_oid);
+	new(node_ptr) tree::node();
+
+	auto leaf_oid = acts.alloc(sizeof(tree::leaf) + value.size());
+	new (pmemobj_direct(leaf_oid)) tree::leaf(key, value);
+	size_++;
+
+	node_ptr->child[slice_index(key, sh)] = leaf_oid.off | 1;
+	node_ptr->child[slice_index(path, sh)] = n;
+	node_ptr->shift = sh;
+	node_ptr->path = key & path_mask(sh);
+		
+	acts.set((uint64_t*)parent, node_oid.off);
+	acts.publish();
 }
 }
 
@@ -173,10 +225,13 @@ string_view tree::get(uint64_t key)
 	 * going wrong way if our path is missing, but that's ok...
 	 */
 	while (n && !n.is_leaf())
-		n = n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)].load();
+		n = n.get_node(pool_id)
+			    ->child[slice_index(key, n.get_node(pool_id)->shift)]
+			    .load();
 
 	if (n && n.get_leaf(pool_id)->key == key)
-		return string_view(n.get_leaf(pool_id)->cdata(), n.get_leaf(pool_id)->value_size);
+		return string_view(n.get_leaf(pool_id)->cdata(),
+				   n.get_leaf(pool_id)->value_size);
 	else
 		throw std::out_of_range("No such key"); // XXX return this info?
 }
@@ -211,7 +266,9 @@ bool tree::remove(obj::pool_base &pop, uint64_t key)
 	while (!kn.is_leaf()) {
 		n_parent = k_parent;
 		n = kn;
-		k_parent = &kn.get_node(pool_id)->child[slice_index(key, kn.get_node(pool_id)->shift)];
+		k_parent =
+			&kn.get_node(pool_id)
+				 ->child[slice_index(key, kn.get_node(pool_id)->shift)];
 		kn = *k_parent;
 
 		if (!kn)
@@ -224,7 +281,8 @@ bool tree::remove(obj::pool_base &pop, uint64_t key)
 	obj::transaction::run(pop, [&] {
 		delete_node(kn);
 
-		n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)] = nullptr;
+		n.get_node(pool_id)->child[slice_index(key, n.get_node(pool_id)->shift)] =
+			nullptr;
 
 		/* Remove the node if there's only one remaining child. */
 		int ochild = -1;
@@ -296,20 +354,6 @@ void tree::delete_node(tree::tagged_node_ptr n)
 	}
 }
 
-obj::persistent_ptr<tree::leaf> tree::make_leaf(uint64_t key, string_view value)
-{
-	assert(pmemobj_tx_stage() == TX_STAGE_WORK);
-
-	obj::persistent_ptr<tree::leaf> leaf_ptr =
-		pmemobj_tx_alloc(sizeof(tree::leaf) + value.size() * sizeof(char), 0);
-
-	new (leaf_ptr.get()) leaf(key, value);
-
-	size_++;
-
-	return leaf_ptr;
-}
-
 tree::tagged_node_ptr::tagged_node_ptr()
 {
 	off = 0;
@@ -364,13 +408,15 @@ bool tree::tagged_node_ptr::is_leaf() const
 tree::leaf *tree::tagged_node_ptr::get_leaf(uint64_t pool_id) const
 {
 	assert(is_leaf());
-	return (tree::leaf *) pmemobj_direct({pool_id,  off.load(std::memory_order_acquire) & ~1ULL});
+	return (tree::leaf *)pmemobj_direct(
+		{pool_id, off.load(std::memory_order_acquire) & ~1ULL});
 }
 
 tree::node *tree::tagged_node_ptr::get_node(uint64_t pool_id) const
 {
 	assert(!is_leaf());
-	return (tree::node *) pmemobj_direct({pool_id,  off.load(std::memory_order_acquire)});
+	return (tree::node *)pmemobj_direct(
+		{pool_id, off.load(std::memory_order_acquire)});
 }
 
 tree::tagged_node_ptr::operator bool() const noexcept

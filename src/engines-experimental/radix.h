@@ -7,8 +7,8 @@
 #include <libpmemobj++/persistent_ptr.hpp>
 #include <libpmemobj++/pool.hpp>
 
-#include <libpmemobj++/mutex.hpp>
 #include <atomic>
+#include <libpmemobj++/mutex.hpp>
 
 namespace pmem
 {
@@ -108,7 +108,13 @@ private:
 
 		void store(tagged_node_ptr ptr)
 		{
-			this->off.store(ptr.off.load(std::memory_order_relaxed), std::memory_order_release);
+			this->off.store(ptr.off.load(std::memory_order_relaxed),
+					std::memory_order_release);
+		}
+
+		void store(uint64_t off)
+		{
+			this->off.store(off, std::memory_order_release);
 		}
 
 		uint64_t get()
@@ -119,7 +125,7 @@ private:
 		explicit operator bool() const noexcept;
 
 	private:
-		//obj::p<std::atomic<uint64_t>> off;
+		// obj::p<std::atomic<uint64_t>> off;
 		std::atomic<uint64_t> off;
 	};
 
@@ -148,15 +154,13 @@ private:
 	struct leaf {
 		leaf(uint64_t key, string_view value);
 
-		void assign(string_view value);
-
 		const char *data() const noexcept;
 		const char *cdata() const noexcept;
 
 		std::size_t capacity();
 
 		obj::p<uint64_t> key;
-		obj::p<uint64_t> value_size ;
+		obj::p<uint64_t> value_size;
 
 	private:
 		char *data();
@@ -182,11 +186,6 @@ private:
 	 * internal: delete_node -- recursively free (to malloc) a subtree
 	 */
 	void delete_node(tagged_node_ptr n);
-
-	/*
-	 * internal: make_leaf -- allocates leaf structure
-	 */
-	obj::persistent_ptr<leaf> make_leaf(uint64_t key, string_view value);
 
 	void iterate_rec(tagged_node_ptr n, pmemkv_get_kv_callback *callback, void *arg);
 };
