@@ -10,6 +10,9 @@
 #include <atomic>
 #include <libpmemobj++/mutex.hpp>
 
+#include <libpmemobj++/detail/enumerable_thread_specific.hpp>
+#include <thread>
+
 namespace pmem
 {
 namespace kv
@@ -71,6 +74,8 @@ public:
 	 * size -- return number of elements
 	 */
 	uint64_t size();
+
+	void collect_garbage();
 
 private:
 	struct leaf;
@@ -171,6 +176,18 @@ private:
 	obj::p<uint64_t> size_;
 	uint64_t pool_id = 0;
 
+	struct tls_data_t {
+		uint64_t off = 0;
+		std::aligned_storage<56, 8> padding;
+	};
+
+	obj::array<obj::vector<uint64_t>, 3> garbage;
+
+	using tls_t = detail::enumerable_thread_specific<tls_data_t>;
+	obj::persistent_ptr<tls_t> tls_ptr;
+
+	void defer_free(uint64_t *off);
+
 	/*
 	 * internal: path_mask -- return bit mask of a path above a subtree [shift]
 	 * bits tall
@@ -220,7 +237,7 @@ public:
 
 private:
 	uint64_t key_to_uint64(string_view v);
-
+	std::thread gc;
 	internal::radix::tree *tree;
 };
 

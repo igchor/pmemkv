@@ -11,6 +11,9 @@
 
 #include <libpmemobj/action_base.h>
 
+#include <array>
+#include <condition_variable>
+#include <list>
 #include <mutex>
 #include <vector>
 
@@ -23,6 +26,62 @@ namespace internal
 {
 namespace radix
 {
+
+struct thread_data_t;
+
+static std::mutex list_mtx;
+static std::list<thread_data_t *> tls_list;
+static std::atomic<uint64_t> global_epoch;
+
+const static uint64_t ACTIVE = (1 << 4);
+
+static std::mutex garbage_mtx;
+
+static std::mutex cv_mtx;
+static std::condition_variable cv;
+
+static std::atomic<bool> gc_complete;
+
+struct thread_data_t {
+	thread_data_t()
+	{
+		std::unique_lock<std::mutex> lock(list_mtx);
+		tls_list.push_front(this);
+		it = tls_list.begin();
+
+		epoch.store(0, std::memory_order_release);
+	}
+
+	~thread_data_t()
+	{
+		std::unique_lock<std::mutex> lock(list_mtx);
+		tls_list.erase(it);
+	}
+
+	void pin()
+	{
+		epoch.store(global_epoch.load(std::memory_order_acquire) | ACTIVE,
+			    std::memory_order_release);
+	}
+
+	void unpin()
+	{
+		{
+			std::unique_lock<std::mutex> lock(cv_mtx);
+			epoch.store(0, std::memory_order_release);
+		}
+		cv.notify_all();
+	}
+
+	std::atomic<uint64_t> epoch;
+
+	/// XX
+
+	std::list<thread_data_t *>::iterator it;
+};
+
+static thread_local thread_data_t thread_data;
+
 
 // XXX - move to utils?
 static inline uint64_t util_mssb_index64(std::size_t value)
@@ -61,6 +120,7 @@ tree::tree()
 {
 	size_ = 0;
 	pool_id = pmemobj_oid(this).pool_uuid_lo;
+	tls_ptr = obj::make_persistent<tls_t>();
 }
 
 tree::~tree()
@@ -105,6 +165,8 @@ struct actions
 
 		if(pmemobj_publish(pop.handle(), acts.data(), acts.size()))
 			throw std::runtime_error("XXX");
+
+		acts.clear();
 	}
 
 private:
@@ -113,8 +175,67 @@ private:
 	uint64_t pool_id;
 };
 
+void tree::defer_free(uint64_t *off)
+{
+	obj::pool_base pop = obj::pool_base(pmemobj_pool_by_oid(PMEMoid{pool_id, 0}));
+	actions acts(pop, pool_id);
+
+	std::unique_lock<std::mutex> lock(garbage_mtx);
+	auto &current_garbage = garbage[global_epoch.load(std::memory_order_acquire)];
+
+	current_garbage.push_back(0);
+	
+	acts.set(off, 0);
+	acts.set(&current_garbage.back(), *off);
+
+	acts.publish();
+}
+
+void tree::collect_garbage()
+{
+	obj::pool_base pop = obj::pool_base(pmemobj_pool_by_oid(PMEMoid{pool_id, 0}));
+	auto epoch = global_epoch.load(std::memory_order_acquire);
+
+	{
+		std::unique_lock<std::mutex> lock(cv_mtx);
+		cv.wait(lock, [&] {
+			std::unique_lock<std::mutex> list_lock(list_mtx);
+			for (auto &t : tls_list) {
+				auto t_epoch = t->epoch.load(std::memory_order_acquire);
+				if (t_epoch & ACTIVE && (t_epoch & ~ACTIVE) != epoch) {
+					return false;
+				}
+			}
+
+			return true;
+		});
+	}
+
+	// std::unique_lock<std::mutex> list_lock(list_mtx);
+	// for (auto &t : tls_list) {
+	// 	auto t_epoch = t->epoch.load(std::memory_order_acquire);
+	// 	if (t_epoch & ACTIVE && (t_epoch & ~ACTIVE) != epoch) {
+	// 		return;
+	// 	}
+	// }
+
+	global_epoch.store((epoch + 1) % 3, std::memory_order_release);
+
+	// probably not necessary
+	std::unique_lock<std::mutex> lock(garbage_mtx);
+	obj::transaction::run(pop, [&]{
+		auto &not_used_garbage = garbage[(epoch + 2) % 3];
+		for (auto &g : not_used_garbage) {
+			pmemobj_tx_free(PMEMoid{pool_id, g});
+		}
+		not_used_garbage.clear();
+	});
+}
+
 void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 {
+	auto &pptr = tls_ptr->local().off;
+
 restart : {
 	actions acts(pop, pool_id);
 
@@ -158,7 +279,8 @@ restart : {
 		auto oid = acts.alloc(sizeof(tree::leaf) + value.size());
 		new (pmemobj_direct(oid)) tree::leaf(key, value);
 		size_++;
-		
+	
+
 		acts.set((uint64_t*)parent, oid.off | 1);
 		acts.publish();
 
@@ -179,12 +301,18 @@ restart : {
 		if (parent->load().get() != n.get())
 			goto restart;
 
+		pptr = n.get();
+		pop.persist(&pptr, sizeof(pptr));
+		// On recovery:
+		// if pptr is inside tree then do nothing (it means publish was interrupted).
+		// otherwise free it (we did not manage to call defer_free).
+
 		auto oid = acts.alloc(sizeof(tree::leaf) + value.size());
 		new (pmemobj_direct(oid)) tree::leaf(key, value);
 		acts.set((uint64_t*)parent, oid.off | 1);
-		acts.free(n.get());
-
 		acts.publish();
+
+		defer_free(&pptr);
 
 		return;
 	}
@@ -440,10 +568,19 @@ radix::radix(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
 				*root_oid);
 		});
 	}
+
+	pmem::kv::internal::radix::gc_complete = false;
+
+	gc = std::thread([&] {
+		while (!pmem::kv::internal::radix::gc_complete.load())
+			tree->collect_garbage();
+	});
 }
 
 radix::~radix()
 {
+	pmem::kv::internal::radix::gc_complete = true;
+	gc.join();
 }
 
 std::string radix::name()
@@ -467,10 +604,13 @@ status radix::count_all(std::size_t &cnt)
 
 status radix::exists(string_view key)
 {
+	pmem::kv::internal::radix::thread_data.pin();
 	try {
 		(void)tree->get(key_to_uint64(key));
+		pmem::kv::internal::radix::thread_data.unpin();
 		return status::OK;
 	} catch (std::out_of_range &) {
+		pmem::kv::internal::radix::thread_data.unpin();
 		return status::NOT_FOUND;
 	}
 }
@@ -478,25 +618,34 @@ status radix::exists(string_view key)
 status radix::get(string_view key, get_v_callback *callback, void *arg)
 {
 	try {
+		pmem::kv::internal::radix::thread_data.pin();
 		auto view = tree->get(key_to_uint64(key));
 		callback(view.data(), view.size(), arg);
 
+		pmem::kv::internal::radix::thread_data.unpin();
 		return status::OK;
 	} catch (std::out_of_range &) {
+		pmem::kv::internal::radix::thread_data.unpin();
 		return status::NOT_FOUND;
 	}
 }
 
 status radix::put(string_view key, string_view value)
 {
+	pmem::kv::internal::radix::thread_data.pin();
 	tree->insert(pmpool, key_to_uint64(key), value);
+	pmem::kv::internal::radix::thread_data.unpin();
 
 	return status::OK;
 }
 
 status radix::remove(string_view key)
 {
-	return tree->remove(pmpool, key_to_uint64(key)) ? status::OK : status::NOT_FOUND;
+	pmem::kv::internal::radix::thread_data.pin();
+	auto s = tree->remove(pmpool, key_to_uint64(key)) ? status::OK : status::NOT_FOUND;
+	pmem::kv::internal::radix::thread_data.unpin();
+
+	return s;
 }
 
 // status defrag(double start_percent, double amount_percent) value_size;
