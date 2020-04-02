@@ -180,8 +180,8 @@ void tree::defer_free(uint64_t *off)
 	obj::pool_base pop = obj::pool_base(pmemobj_pool_by_oid(PMEMoid{pool_id, 0}));
 	actions acts(pop, pool_id);
 
-	std::unique_lock<std::mutex> lock(garbage_mtx);
-	auto &current_garbage = garbage[global_epoch.load(std::memory_order_acquire)];
+	//std::unique_lock<std::mutex> lock(garbage_mtx);
+	auto &current_garbage = tls_ptr->local().garbage[global_epoch.load(std::memory_order_acquire)];
 
 	current_garbage.push_back(0);
 	
@@ -196,39 +196,41 @@ void tree::collect_garbage()
 	obj::pool_base pop = obj::pool_base(pmemobj_pool_by_oid(PMEMoid{pool_id, 0}));
 	auto epoch = global_epoch.load(std::memory_order_acquire);
 
-	{
-		std::unique_lock<std::mutex> lock(cv_mtx);
-		cv.wait(lock, [&] {
-			std::unique_lock<std::mutex> list_lock(list_mtx);
-			for (auto &t : tls_list) {
-				auto t_epoch = t->epoch.load(std::memory_order_acquire);
-				if (t_epoch & ACTIVE && (t_epoch & ~ACTIVE) != epoch) {
-					return false;
-				}
-			}
+	// {
+	// 	std::unique_lock<std::mutex> lock(cv_mtx);
+	// 	cv.wait(lock, [&] {
+	// 		std::unique_lock<std::mutex> list_lock(list_mtx);
+	// 		for (auto &t : tls_list) {
+	// 			auto t_epoch = t->epoch.load(std::memory_order_acquire);
+	// 			if (t_epoch & ACTIVE && (t_epoch & ~ACTIVE) != epoch) {
+	// 				return false;
+	// 			}
+	// 		}
 
-			return true;
-		});
-	}
-
-	// std::unique_lock<std::mutex> list_lock(list_mtx);
-	// for (auto &t : tls_list) {
-	// 	auto t_epoch = t->epoch.load(std::memory_order_acquire);
-	// 	if (t_epoch & ACTIVE && (t_epoch & ~ACTIVE) != epoch) {
-	// 		return;
-	// 	}
+	// 		return true;
+	// 	});
 	// }
+
+	std::unique_lock<std::mutex> list_lock(list_mtx);
+	for (auto &t : tls_list) {
+		auto t_epoch = t->epoch.load(std::memory_order_acquire);
+		if (t_epoch & ACTIVE && (t_epoch & ~ACTIVE) != epoch) {
+			return;
+		}
+	}
 
 	global_epoch.store((epoch + 1) % 3, std::memory_order_release);
 
 	// probably not necessary
-	std::unique_lock<std::mutex> lock(garbage_mtx);
+	//std::unique_lock<std::mutex> lock(garbage_mtx);
 	obj::transaction::run(pop, [&]{
-		auto &not_used_garbage = garbage[(epoch + 2) % 3];
-		for (auto &g : not_used_garbage) {
-			pmemobj_tx_free(PMEMoid{pool_id, g});
+		for (auto &tls : *tls_ptr) {
+			auto &not_used_garbage = tls.garbage[(epoch + 2) % 3];
+			for (auto &g : not_used_garbage) {
+				pmemobj_tx_free(PMEMoid{pool_id, g});
+			}
+			not_used_garbage.clear();
 		}
-		not_used_garbage.clear();
 	});
 }
 

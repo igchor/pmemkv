@@ -178,10 +178,11 @@ private:
 
 	struct tls_data_t {
 		uint64_t off = 0;
-		std::aligned_storage<56, 8> padding;
+		obj::array<obj::vector<uint64_t>, 3> garbage;
+		std::aligned_storage<256 - sizeof(off) - sizeof(garbage), 8> padding;
 	};
 
-	obj::array<obj::vector<uint64_t>, 3> garbage;
+	
 
 	using tls_t = detail::enumerable_thread_specific<tls_data_t>;
 	obj::persistent_ptr<tls_t> tls_ptr;
