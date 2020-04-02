@@ -66,11 +66,11 @@ struct thread_data_t {
 
 	void unpin()
 	{
-		{
-			std::unique_lock<std::mutex> lock(cv_mtx);
+	//	{
+	//		std::unique_lock<std::mutex> lock(cv_mtx);
 			epoch.store(0, std::memory_order_release);
-		}
-		cv.notify_all();
+	//	}
+	//	cv.notify_all();
 	}
 
 	std::atomic<uint64_t> epoch;
