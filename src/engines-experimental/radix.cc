@@ -8,11 +8,15 @@
 #include <libpmemobj++/p.hpp>
 #include <libpmemobj++/pext.hpp>
 #include <libpmemobj++/transaction.hpp>
+#include <libpmemobj++/pool.hpp>
 
 namespace pmem
 {
 namespace kv
 {
+
+static unsigned alloc_class_id;
+static unsigned value_alloc_class_id;
 
 namespace internal
 {
@@ -134,7 +138,8 @@ void tree::insert(obj::pool_base &pop, uint64_t key, string_view value)
 	sh_t sh = util_mssb_index64(at) & (sh_t) ~(SLICE - 1);
 
 	obj::transaction::run(pop, [&] {
-		auto m = obj::make_persistent<node>();
+		auto m = obj::make_persistent<node>(obj::allocation_flag::class_id(
+					alloc_class_id));
 		m->child[slice_index(key, sh)] = make_leaf(key, value);
 		m->child[slice_index(path, sh)] = n;
 		m->shift = sh;
@@ -281,7 +286,7 @@ obj::persistent_ptr<tree::leaf> tree::make_leaf(uint64_t key, string_view value)
 	assert(pmemobj_tx_stage() == TX_STAGE_WORK);
 
 	obj::persistent_ptr<tree::leaf> leaf_ptr =
-		pmemobj_tx_alloc(sizeof(tree::leaf) + value.size() * sizeof(char), 0);
+		pmemobj_tx_alloc(sizeof(tree::leaf) + value.size() * sizeof(char), POBJ_CLASS_ID(value_alloc_class_id));
 
 	new (leaf_ptr.get()) leaf(key, value);
 
@@ -363,6 +368,28 @@ radix::radix(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
 				*root_oid);
 		});
 	}
+
+	pobj_alloc_class_desc desc = {
+		sizeof(internal::radix::tree::node),
+		alignof(internal::radix::tree::node),
+		1024,
+		POBJ_HEADER_NONE,
+		0
+	};
+
+	desc = obj::ctl_set_detail(pmpool.handle(), "heap.alloc_class.new.desc", desc);
+	alloc_class_id = desc.class_id;
+
+	desc = {
+		sizeof(internal::radix::tree::leaf) + 200,
+		alignof(internal::radix::tree::leaf),
+		1024,
+		POBJ_HEADER_NONE,
+		0
+	};
+
+	desc = obj::ctl_set_detail(pmpool.handle(), "heap.alloc_class.new.desc", desc);
+	value_alloc_class_id = desc.class_id;
 }
 
 radix::~radix()

@@ -69,7 +69,7 @@ public:
 	 */
 	uint64_t size();
 
-private:
+//private:
 	struct leaf;
 	struct node;
 
@@ -187,6 +187,7 @@ public:
 	// status defrag(double start_percent, double amount_percent) final;
 
 private:
+
 	uint64_t key_to_uint64(string_view v);
 
 	internal::radix::tree *tree;
