@@ -183,10 +183,16 @@ void tree::defer_free(uint64_t *off)
 	//std::unique_lock<std::mutex> lock(garbage_mtx);
 	auto &current_garbage = tls_ptr->local().garbage[global_epoch.load(std::memory_order_acquire)];
 
-	current_garbage.push_back(0);
+	if (current_garbage.second.capacity() == 0) {
+		current_garbage.second.resize(1024);
+		current_garbage.first = 0;
+	} else if (current_garbage.first >= current_garbage.second.size()) {
+		current_garbage.second.resize(current_garbage.second.size() * 2);
+	}
 	
 	acts.set(off, 0);
-	acts.set(&current_garbage.back(), *off);
+	acts.set(&current_garbage.second[current_garbage.first], *off);
+	acts.set(&current_garbage.first, current_garbage.first + 1);
 
 	acts.publish();
 }
@@ -226,10 +232,11 @@ void tree::collect_garbage()
 	obj::transaction::run(pop, [&]{
 		for (auto &tls : *tls_ptr) {
 			auto &not_used_garbage = tls.garbage[(epoch + 2) % 3];
-			for (auto &g : not_used_garbage) {
-				pmemobj_tx_free(PMEMoid{pool_id, g});
+			for (uint64_t i = 0; i < not_used_garbage.first; i++) {
+				pmemobj_tx_free(PMEMoid{pool_id, not_used_garbage.second.const_at(i)});
 			}
-			not_used_garbage.clear();
+			not_used_garbage.first = 0;
+			// not_used_garbage.second.resize(0?)
 		}
 	});
 }

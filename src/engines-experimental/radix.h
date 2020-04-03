@@ -178,7 +178,7 @@ private:
 
 	struct tls_data_t {
 		uint64_t off = 0;
-		obj::array<obj::vector<uint64_t>, 3> garbage;
+		obj::array<std::pair<uint64_t, obj::vector<uint64_t>>, 3> garbage;
 		std::aligned_storage<256 - sizeof(off) - sizeof(garbage), 8> padding;
 	};
 
