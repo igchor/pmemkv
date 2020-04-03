@@ -382,9 +382,9 @@ radix::radix(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
 	}
 
 	pobj_alloc_class_desc desc = {
-		sizeof(internal::radix::tree::node),
-		alignof(internal::radix::tree::node),
-		1024,
+		256,
+		256,
+		10 * 1024,
 		POBJ_HEADER_NONE,
 		0
 	};
@@ -392,15 +392,15 @@ radix::radix(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
 	desc = obj::ctl_set_detail(pmpool.handle(), "heap.alloc_class.new.desc", desc);
 	alloc_class_id = desc.class_id;
 
-	desc = {
-		sizeof(internal::radix::tree::leaf) + 200,
-		alignof(internal::radix::tree::leaf),
-		1024,
-		POBJ_HEADER_NONE,
-		0
-	};
+	// desc = {
+	// 	sizeof(internal::radix::tree::leaf) + 200,
+	// 	alignof(internal::radix::tree::leaf),
+	// 	1024,
+	// 	POBJ_HEADER_NONE,
+	// 	0
+	// };
 
-	desc = obj::ctl_set_detail(pmpool.handle(), "heap.alloc_class.new.desc", desc);
+	//desc = obj::ctl_set_detail(pmpool.handle(), "heap.alloc_class.new.desc", desc);
 	value_alloc_class_id = desc.class_id;
 }
 
