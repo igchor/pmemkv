@@ -581,8 +581,10 @@ radix::radix(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
 	pmem::kv::internal::radix::gc_complete = false;
 
 	gc = std::thread([&] {
-		while (!pmem::kv::internal::radix::gc_complete.load())
+		while (!pmem::kv::internal::radix::gc_complete.load()) {
+			usleep(200000);
 			tree->collect_garbage();
+		}
 	});
 }
 
