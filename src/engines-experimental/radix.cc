@@ -13,6 +13,7 @@
 
 #include <mutex>
 #include <vector>
+#include <shared_mutex>
 
 namespace pmem
 {
@@ -120,7 +121,7 @@ restart : {
 
 	auto n = root.load();
 	if (!n) {
-		std::unique_lock<obj::mutex> lock(root_mtx);
+		std::unique_lock<obj::shared_mutex> lock(root_mtx);
 
 		if (n.get() != root.load().get())
 			goto restart;
@@ -150,7 +151,7 @@ restart : {
 	auto *mtx = parent == &root ? &root_mtx : &prev.get_node(pool_id)->mtx;
 
 	if (!n) {
-		std::unique_lock<obj::mutex> lock(*mtx);
+		std::unique_lock<obj::shared_mutex> lock(*mtx);
 
 		if (parent->load().get() != n.get())
 			goto restart;
@@ -172,7 +173,7 @@ restart : {
 	if (!at) {
 		assert(n.is_leaf());
 
-		std::unique_lock<obj::mutex> lock(*mtx);
+		std::unique_lock<obj::shared_mutex> lock(*mtx);
 
 		// XXX here and in other places - chcek for obsolete flag
 		// because parent itself could have been unpinned
@@ -192,7 +193,7 @@ restart : {
 	/* and convert that to an index. */
 	sh_t sh = util_mssb_index64(at) & (sh_t) ~(SLICE - 1);
 
-	std::unique_lock<obj::mutex> lock(*mtx);
+	std::unique_lock<obj::shared_mutex> lock(*mtx);
 
 	if (parent->load().get() != n.get())
 		goto restart;
@@ -205,6 +206,9 @@ restart : {
 	new (pmemobj_direct(leaf_oid)) tree::leaf(key, value);
 	size_++;
 
+	// if we would like to get rid of redo logs we could
+	// just allocate both leaf and node (just ahead of time) in tls
+	// at the beggining of this method an just set all fields here
 	node_ptr->child[slice_index(key, sh)] = leaf_oid.off | 1;
 	node_ptr->child[slice_index(path, sh)] = n;
 	node_ptr->shift = sh;
@@ -215,25 +219,37 @@ restart : {
 }
 }
 
-string_view tree::get(uint64_t key)
+void tree::get(uint64_t key, pmemkv_get_v_callback *cb, void *arg)
 {
+	restart: {
 	auto n = root;
+	auto prev = n;
+	auto parent = &root;
 
 	/*
 	 * critbit algorithm: dive into the tree, looking at nothing but
 	 * each node's critical bit^H^H^Hnibble.  This means we risk
 	 * going wrong way if our path is missing, but that's ok...
 	 */
-	while (n && !n.is_leaf())
-		n = n.get_node(pool_id)
-			    ->child[slice_index(key, n.get_node(pool_id)->shift)]
-			    .load();
+	while (n && !n.is_leaf()) {
+		prev = n;
+		parent = &n.get_node(pool_id)
+			    ->child[slice_index(key, n.get_node(pool_id)->shift)];
+		n = parent->load();
+	}
 
-	if (n && n.get_leaf(pool_id)->key == key)
-		return string_view(n.get_leaf(pool_id)->cdata(),
-				   n.get_leaf(pool_id)->value_size);
-	else
+	if (n && n.get_leaf(pool_id)->key == key) {
+		auto &mtx = parent == &root ? root_mtx : prev.get_node(pool_id)->mtx;
+		std::shared_lock<obj::shared_mutex> lock(mtx);
+
+		if (parent->load().get() != n.get())
+			goto restart;
+
+		cb(n.get_leaf(pool_id)->cdata(), n.get_leaf(pool_id)->value_size, arg);
+
+	} else
 		throw std::out_of_range("No such key"); // XXX return this info?
+}
 }
 
 bool tree::remove(obj::pool_base &pop, uint64_t key)
@@ -468,7 +484,7 @@ status radix::count_all(std::size_t &cnt)
 status radix::exists(string_view key)
 {
 	try {
-		(void)tree->get(key_to_uint64(key));
+		(void)tree->get(key_to_uint64(key), [](const char* v, size_t size, void *arg){}, nullptr);
 		return status::OK;
 	} catch (std::out_of_range &) {
 		return status::NOT_FOUND;
@@ -478,9 +494,7 @@ status radix::exists(string_view key)
 status radix::get(string_view key, get_v_callback *callback, void *arg)
 {
 	try {
-		auto view = tree->get(key_to_uint64(key));
-		callback(view.data(), view.size(), arg);
-
+		tree->get(key_to_uint64(key), callback, arg);
 		return status::OK;
 	} catch (std::out_of_range &) {
 		return status::NOT_FOUND;

@@ -8,7 +8,7 @@
 #include <libpmemobj++/pool.hpp>
 
 #include <atomic>
-#include <libpmemobj++/mutex.hpp>
+#include <libpmemobj++/shared_mutex.hpp>
 
 namespace pmem
 {
@@ -55,7 +55,7 @@ public:
 	/*
 	 * get -- query for a key ("==" match), returns value or NULL
 	 */
-	string_view get(uint64_t key);
+	void get(uint64_t key, pmemkv_get_v_callback *cb, void *arg);
 
 	/*
 	 * remove -- delete a key from the critnib structure, return its value
@@ -145,7 +145,7 @@ private:
 		 *              +-----+
 		 *               shift
 		 */
-		obj::mutex mtx;
+		obj::shared_mutex mtx;
 		tagged_node_ptr child[SLNODES];
 		obj::p<uint64_t> path;
 		obj::p<sh_t> shift;
@@ -166,7 +166,7 @@ private:
 		char *data();
 	};
 
-	obj::mutex root_mtx;
+	obj::shared_mutex root_mtx;
 	tagged_node_ptr root;
 	obj::p<uint64_t> size_;
 	uint64_t pool_id = 0;
