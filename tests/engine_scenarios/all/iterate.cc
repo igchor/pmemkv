@@ -31,21 +31,18 @@ static test_kv_list sort(test_kv_list list)
 
 static void GetAllTest(pmem::kv::db &kv)
 {
-	/**
-	 * TEST: get_all should return all elements in db and count_all should count them
-	 * properly
-	 */
-	UT_ASSERTeq(kv.put("1", "one"), status::OK);
+	UT_ASSERT(kv.put("10000000", "one") == status::OK);
 	std::size_t cnt = std::numeric_limits<std::size_t>::max();
-	UT_ASSERT(kv.count_all(cnt) == status::OK && cnt == 1);
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERT(cnt == 1);
+	UT_ASSERT(kv.put("20000000", "two") == status::OK);
 	cnt = std::numeric_limits<std::size_t>::max();
-
-	UT_ASSERT(kv.put("2", "two") == status::OK);
-	UT_ASSERT(kv.count_all(cnt) == status::OK && cnt == 2);
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERT(cnt == 2);
+	UT_ASSERT(kv.put("记!0000", "RR") == status::OK);
 	cnt = std::numeric_limits<std::size_t>::max();
-
-	UT_ASSERT(kv.put("记!", "RR") == status::OK);
-	UT_ASSERT(kv.count_all(cnt) == status::OK && cnt == 3);
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERT(cnt == 3);
 
 	test_kv_list result;
 	/* get_all using string_view */
@@ -56,7 +53,8 @@ static void GetAllTest(pmem::kv::db &kv)
 	});
 	UT_ASSERTeq(s, status::OK);
 
-	auto expected = test_kv_list{{"1", "one"}, {"2", "two"}, {"记!", "RR"}};
+	auto expected =
+		test_kv_list{{"10000000", "one"}, {"20000000", "two"}, {"记!0000", "RR"}};
 	UT_ASSERT((sort(result) == sort(expected)));
 	result = {};
 
@@ -70,7 +68,8 @@ static void GetAllTest(pmem::kv::db &kv)
 		&result);
 	UT_ASSERTeq(s, status::OK);
 
-	expected = test_kv_list{{"1", "one"}, {"2", "two"}, {"记!", "RR"}};
+	expected =
+		test_kv_list{{"10000000", "one"}, {"20000000", "two"}, {"记!0000", "RR"}};
 	UT_ASSERT((sort(result) == sort(expected)));
 }
 
