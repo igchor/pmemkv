@@ -105,8 +105,9 @@ Every engine has documented all supported config parameters (please see **libpme
 `int pmemkv_config_put_object_cb(pmemkv_config *config, const char *key, void *value, void *(*getter)(void *), void (*deleter)(void *));`
 
 :	Extended version of pmemkv_config_put_object. It accepts one additional argument -
-	a `getter` callback. This callback interprets the custom object (`value`) and returns
-	a pointer which is expected by pmemkv.
+	a `getter` callback. This callback should accept `void*` pointer to `value` and
+	return `void*` a pointer to data expected by pmemkv. This callback will be used by
+	pmemkv_config_get_object to parse the `value`.
 
 	Calling pmemkv_config_put_object_cb with `getter` implemented as:
 	```
