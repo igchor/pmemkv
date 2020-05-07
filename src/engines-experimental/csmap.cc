@@ -9,7 +9,8 @@ namespace pmem
 namespace kv
 {
 
-csmap::csmap(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
+csmap::csmap(std::unique_ptr<internal::config> cfg)
+    : pmemobj_engine_base(cfg), config(std::move(cfg))
 {
 	LOG("Started ok");
 	Recover();
@@ -288,6 +289,8 @@ void csmap::Recover()
 
 		container = &pmem_ptr->map;
 		container->runtime_initialize();
+		container->key_comp().runtime_initialize(
+			internal::extract_comparator(*config));
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
@@ -297,6 +300,8 @@ void csmap::Recover()
 			auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
 				pmemobj_direct(*root_oid));
 			container = &pmem_ptr->map;
+			container->key_comp().initialize(
+				internal::extract_comparator(*config));
 			container->runtime_initialize();
 		});
 	}
