@@ -37,9 +37,6 @@ It has multiple storage engines, each optimized for a different use case. They d
 
 Persistent engines usually use libpmemobj++ and PMDK to access NVDIMMs. They can work with files on DAX filesystem (fsdax) or DAX device.
 
-For description of pmemkv core API see **libpmemkv**(3).
-For description of pmemkv configuration API see **libpmemkv_config**(3).
-
 # ENGINES #
 
 | Engine Name  | Description | Persistent? | Concurrent? | Sorted? |
@@ -52,6 +49,10 @@ For description of pmemkv configuration API see **libpmemkv_config**(3).
 The most mature and recommended engine to use for persistent use-cases is **cmap**. It provides good performance results and stability.
 
 Each engine can be manually turned on and off at build time, using CMake options. All engines listed here are enabled and ready to use.
+
+To configure an engine, pmemkv_config is used (**libpmemkv_config**(3)). Below is a list of engines along with config parameters the expect. Each paramter has certain type and should be inerted to config using appropriate function. For example, to insert parameter of type `string` `pmemkv_config_put_string` function should be used.
+
+For description of pmemkv core API see **libpmemkv**(3).
 
 ## cmap
 
