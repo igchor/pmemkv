@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../pmemobj_engine.h"
+#include "../pmemobj_handle.h"
 #include "stree/persistent_b_tree.h"
 #include "stree/pstring.h"
 
@@ -29,7 +29,7 @@ typedef persistent::b_tree<pstring<MAX_KEY_SIZE>, pstring<MAX_VALUE_SIZE>, DEGRE
 } /* namespace stree */
 } /* namespace internal */
 
-class stree : public pmemobj_engine_base<internal::stree::btree_type> {
+class stree : public engine_base {
 public:
 	stree(std::unique_ptr<internal::config> cfg);
 	~stree();
@@ -66,6 +66,7 @@ private:
 	void operator=(const stree &);
 	void Recover();
 	internal::stree::btree_type *my_btree;
+	pmemobj_handle<internal::cmap::map_t> handle;
 };
 
 } /* namespace kv */

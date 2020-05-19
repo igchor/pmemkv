@@ -19,7 +19,7 @@ namespace pmem
 namespace kv
 {
 
-stree::stree(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
+stree::stree(std::unique_ptr<internal::config> cfg) : handle(cfg)
 {
 	Recover();
 	LOG("Started ok");
@@ -300,17 +300,17 @@ status stree::remove(string_view key)
 
 void stree::Recover()
 {
-	if (!OID_IS_NULL(*root_oid)) {
-		my_btree = (internal::stree::btree_type *)pmemobj_direct(*root_oid);
+	if (!handle.get()) {
+		my_btree = handle.get();
 		my_btree->garbage_collection();
-	} else {
-		pmem::obj::transaction::manual tx(pmpool);
-		pmem::obj::transaction::snapshot(root_oid);
-		*root_oid =
-			pmem::obj::make_persistent<internal::stree::btree_type>().raw();
-		pmem::obj::transaction::commit();
-		my_btree = (internal::stree::btree_type *)pmemobj_direct(*root_oid);
+
+		return;
 	}
+
+	pmem::obj::transaction::run(handle.pool(), [&] {
+		handle.initialize(pmem::obj::make_persistent<internal::stree::btree_type>());
+		my_btree = handle.get();
+	});
 }
 
 } // namespace kv

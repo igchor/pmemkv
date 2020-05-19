@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /* Copyright 2019, Intel Corporation */
 
-#ifndef LIBPMEMKV_PMEMOBJ_ENGINE_H
-#define LIBPMEMKV_PMEMOBJ_ENGINE_H
+#ifndef LIBPMEMKV_PMEMOBJ_HANDLE_H
+#define LIBPMEMKV_PMEMOBJ_HANDLE_H
 
 #include <iostream>
 #include <unistd.h>
@@ -26,9 +26,9 @@ namespace kv
 {
 
 template <typename EngineData>
-class pmemobj_engine_base : public engine_base {
+class pmemobj_handle {
 public:
-	pmemobj_engine_base(std::unique_ptr<internal::config> &cfg)
+	pmemobj_handle(const std::unique_ptr<internal::config> &cfg)
 	{
 		const char *path = nullptr;
 		std::size_t size;
@@ -72,13 +72,33 @@ public:
 		}
 	}
 
-	~pmemobj_engine_base()
+	~pmemobj_handle()
 	{
 		if (cfg_by_path)
 			pmpool.close();
 	}
 
-protected:
+	void initialize(pmem::obj::persistent_ptr<EngineData> ptr)
+	{
+		assert(pmemobj_tx_stage() == TX_STAGE_WORK);
+
+		pmem::obj::transaction::snapshot(root_oid);
+		*root_oid = ptr.raw();
+
+		return *this;
+	}
+
+	pmem::obj::pool_base pool()
+	{
+		return pmpool;
+	}
+
+	EngineData *get()
+	{
+		return static_cast<EngineData *>(pmemobj_direct(*root_oid));
+	}
+
+private:
 	struct Root {
 		pmem::obj::persistent_ptr<EngineData>
 			ptr; /* used when path is specified */
@@ -93,4 +113,4 @@ protected:
 } /* namespace kv */
 } /* namespace pmem */
 
-#endif /* LIBPMEMKV_PMEMOBJ_ENGINE_H */
+#endif /* LIBPMEMKV_PMEMOBJ_HANDLE_H */

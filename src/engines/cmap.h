@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../pmemobj_engine.h"
+#include "../pmemobj_handle.h"
 #include "../polymorphic_string.h"
 
 #include <libpmemobj++/container/concurrent_hash_map.hpp>
@@ -61,7 +61,7 @@ using map_t = pmem::obj::concurrent_hash_map<string_t, string_t, string_hasher>;
 } /* namespace cmap */
 } /* namespace internal */
 
-class cmap : public pmemobj_engine_base<internal::cmap::map_t> {
+class cmap : public engine_base {
 public:
 	cmap(std::unique_ptr<internal::config> cfg);
 	~cmap();
@@ -86,7 +86,9 @@ public:
 	status defrag(double start_percent, double amount_percent) final;
 
 private:
-	void Recover();
+	void recover();
+
+	pmemobj_handle<internal::cmap::map_t> handle;
 	internal::cmap::map_t *container;
 };
 

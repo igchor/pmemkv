@@ -4,7 +4,7 @@
 #pragma once
 
 #include "../comparator/pmemobj_comparator.h"
-#include "../pmemobj_engine.h"
+#include "../pmemobj_handle.h"
 
 #include <libpmemobj++/container/string.hpp>
 #include <libpmemobj++/experimental/concurrent_map.hpp>
@@ -78,7 +78,7 @@ static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 } /* namespace csmap */
 } /* namespace internal */
 
-class csmap : public pmemobj_engine_base<internal::csmap::pmem_type> {
+class csmap : public engine_base {
 public:
 	csmap(std::unique_ptr<internal::config> cfg);
 	~csmap();
@@ -127,6 +127,7 @@ private:
 	global_mutex_type mtx;
 	container_type *container;
 	std::unique_ptr<internal::config> config;
+	pmemobj_handle<internal::cmap::map_t> handle;
 };
 
 } /* namespace kv */

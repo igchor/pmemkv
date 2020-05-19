@@ -10,7 +10,7 @@ namespace kv
 {
 
 csmap::csmap(std::unique_ptr<internal::config> cfg)
-    : pmemobj_engine_base(cfg), config(std::move(cfg))
+    : handle(cfg), config(std::move(cfg))
 {
 	LOG("Started ok");
 	Recover();
@@ -265,7 +265,7 @@ status csmap::put(string_view key, string_view value)
 	if (result.second == false) {
 		auto &it = result.first;
 		std::unique_lock<decltype(it->second.mtx)> lock(it->second.mtx);
-		pmem::obj::transaction::run(pmpool, [&] {
+		pmem::obj::transaction::run(handle.pop(), [&] {
 			it->second.val.assign(value.data(), value.size());
 		});
 	}
@@ -283,28 +283,23 @@ status csmap::remove(string_view key)
 
 void csmap::Recover()
 {
-	if (!OID_IS_NULL(*root_oid)) {
-		auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
-			pmemobj_direct(*root_oid));
-
-		container = &pmem_ptr->map;
+	if (!handle.get()) {
+		container = &handle.get()->map;
 		container->runtime_initialize();
 		container->key_comp().runtime_initialize(
 			internal::extract_comparator(*config));
-	} else {
-		pmem::obj::transaction::run(pmpool, [&] {
-			pmem::obj::transaction::snapshot(root_oid);
-			*root_oid =
-				pmem::obj::make_persistent<internal::csmap::pmem_type>()
-					.raw();
-			auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
-				pmemobj_direct(*root_oid));
-			container = &pmem_ptr->map;
-			container->key_comp().initialize(
-				internal::extract_comparator(*config));
-			container->runtime_initialize();
-		});
+
+		return;
 	}
+
+	pmem::obj::transaction::run(handle.pool(), [&] {
+		handle.initialize(pmem::obj::make_persistent<internal::cmap::map_t>());
+
+		container = &handle.get()->map;
+		container->key_comp().initialize(
+				internal::extract_comparator(*config));
+		container->runtime_initialize();
+	});
 }
 
 } // namespace kv

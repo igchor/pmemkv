@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../pmemobj_engine.h"
+#include "../pmemobj_handle.h"
 
 #include <libpmemobj++/make_persistent.hpp>
 #include <libpmemobj++/make_persistent_array.hpp>
@@ -175,8 +175,7 @@ struct KVRecoveredLeaf {		 // temporary wrapper used for recovery
 } /* namespace tree3 */
 } /* namespace internal */
 
-class tree3
-    : public pmemobj_engine_base<internal::tree3::KVLeaf> { // hybrid B+ tree engine
+class tree3 : public engine_base { // hybrid B+ tree engine
 public:
 	tree3(std::unique_ptr<internal::config> cfg);
 	~tree3();
@@ -218,6 +217,7 @@ private:
 	vector<persistent_ptr<internal::tree3::KVLeaf>>
 		leaves_prealloc;		      // persisted but unused leaves
 	unique_ptr<internal::tree3::KVNode> tree_top; // pointer to uppermost inner node
+	pmemobj_handle<internal::cmap::map_t> handle;
 };
 
 } /* namespace kv */

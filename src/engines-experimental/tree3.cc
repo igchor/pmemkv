@@ -16,9 +16,9 @@ namespace pmem
 namespace kv
 {
 
-tree3::tree3(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
+tree3::tree3(std::unique_ptr<internal::config> cfg) : handle(cfg)
 {
-	Recover();
+	recover();
 	LOG("Started ok");
 }
 
@@ -406,14 +406,14 @@ void tree3::InnerUpdateAfterSplit(internal::tree3::KVNode *node,
 // PROTECTED LIFECYCLE METHODS
 // ===============================================================================================
 
-void tree3::Recover()
+void tree3::recover()
 {
 	LOG("Recovering");
 
 	// traverse persistent leaves to build list of leaves to recover
 	std::list<internal::tree3::KVRecoveredLeaf> leaves;
 
-	auto root_leaf = persistent_ptr<internal::tree3::KVLeaf>(*root_oid);
+	auto root_leaf = persistent_ptr<internal::tree3::KVLeaf>(handle.get());
 
 	while (root_leaf) {
 		unique_ptr<internal::tree3::KVLeafNode> leafnode(
