@@ -9,13 +9,12 @@
  * (count returns the number of such records).
  */
 
-static void GetAboveTest(std::string engine, pmem::kv::config &&config)
+static void GetAboveTest(pmem::kv::db &kv)
 {
 	/**
 	 * TEST: Basic test with hardcoded strings. Some new keys added.
 	 * It's NOT suitable to test with custom comparator.
 	 */
-	auto kv = INITIALIZE_KV(engine, std::move(config));
 	verify_get_above(kv, EMPTY_KEY, 0, kv_list());
 
 	/* insert bunch of keys */
@@ -54,18 +53,15 @@ static void GetAboveTest(std::string engine, pmem::kv::config &&config)
 
 	CLEAR_KV(kv);
 	verify_get_above_c(kv, MIN_KEY, 0, kv_list());
-
-	kv.close();
 }
 
-static void GetAboveTest2(std::string engine, pmem::kv::config &&config)
+static void GetAboveTest2(pmem::kv::db &kv)
 {
 	/**
 	 * TEST: Basic test with hardcoded strings. Some keys are removed.
 	 * This test is using C-like API.
 	 * It's NOT suitable to test with custom comparator.
 	 */
-	auto kv = INITIALIZE_KV(engine, std::move(config));
 	verify_get_above_c(kv, MIN_KEY, 0, kv_list());
 
 	/* insert bunch of keys */
@@ -95,25 +91,16 @@ static void GetAboveTest2(std::string engine, pmem::kv::config &&config)
 
 	CLEAR_KV(kv);
 	verify_get_above_c(kv, MIN_KEY, 0, kv_list());
-
-	kv.close();
 }
 
-static void GetAboveRandTest(std::string engine, pmem::kv::config &&config,
-			     const size_t items, const size_t max_key_len)
+template <typename Comparator = pmemkv_default_comparator>
+static void GetAboveRandTest(pmem::kv::db &kv, const size_t items,
+			     const size_t max_key_len,
+			     std::function<kv_list(kv_list)> sort)
 {
 	/**
 	 * TEST: Randomly generated keys.
 	 */
-
-	/* XXX: add comparator to kv_sort method, perhaps as param */
-
-	/* XXX: to be enabled for Comparator support (in all below test functions) */
-	// auto cmp = std::unique_ptr<comparator>(new Comparator());
-	// auto s = config.put_comparator(std::move(cmp));
-	// UT_ASSERTeq(s, status::OK);
-
-	auto kv = INITIALIZE_KV(engine, std::move(config));
 	verify_get_above(kv, "randtest", 0, kv_list());
 
 	/* generate keys and put them one at a time */
@@ -128,10 +115,10 @@ static void GetAboveRandTest(std::string engine, pmem::kv::config &&config,
 		expected.emplace_back(key, value);
 
 		/* verifies all elements */
-		verify_get_above(kv, MIN_KEY, i + 1, kv_sort(expected));
+		verify_get_above(kv, MIN_KEY, i + 1, sort(expected));
 
 		/* verifies elements above the first one */
-		auto exp_sorted = kv_sort(expected);
+		auto exp_sorted = sort(expected);
 		verify_get_above(kv, exp_sorted[0].first, i,
 				 kv_list(exp_sorted.begin() + 1, exp_sorted.end()));
 
@@ -151,19 +138,16 @@ static void GetAboveRandTest(std::string engine, pmem::kv::config &&config,
 	}
 
 	CLEAR_KV(kv);
-	kv.close();
 }
 
-static void GetAboveIncrTest(std::string engine, pmem::kv::config &&config,
-			     const size_t max_key_len)
+static void GetAboveIncrTest(pmem::kv::db &kv, const size_t max_key_len,
+			     std::function<kv_list(kv_list)> sort)
 {
 	/**
 	 * TEST: Generated keys with incremental keys, e.g. "A", "AA", ..., "B", "BB", ...
 	 * Keys are added and checked if get_above returns properly all data.
 	 * After initial part of the test, some new keys are added.
 	 */
-
-	auto kv = INITIALIZE_KV(engine, std::move(config));
 	verify_get_above(kv, "a_inc", 0, kv_list());
 
 	/* generate keys and put them one at a time */
@@ -178,10 +162,10 @@ static void GetAboveIncrTest(std::string engine, pmem::kv::config &&config,
 		expected.emplace_back(key, value);
 
 		/* verifies all elements */
-		verify_get_above(kv, MIN_KEY, i + 1, kv_sort(expected));
+		verify_get_above(kv, MIN_KEY, i + 1, sort(expected));
 
 		/* verifies elements above the first one */
-		auto exp_sorted = kv_sort(expected);
+		auto exp_sorted = sort(expected);
 		verify_get_above(kv, exp_sorted[0].first, i,
 				 kv_list(exp_sorted.begin() + 1, exp_sorted.end()));
 
@@ -200,7 +184,7 @@ static void GetAboveIncrTest(std::string engine, pmem::kv::config &&config,
 	UT_ASSERTeq(kv.put(MAX_KEY + MAX_KEY, "init1"), status::OK);
 
 	expected = kv_list{{MAX_KEY, "init0"}, {MAX_KEY + MAX_KEY, "init1"}};
-	verify_get_above(kv, MIN_KEY, 2, kv_sort(expected));
+	verify_get_above(kv, MIN_KEY, 2, sort(expected));
 
 	/* add keys again */
 	keys = gen_incr_keys(max_key_len);
@@ -212,20 +196,20 @@ static void GetAboveIncrTest(std::string engine, pmem::kv::config &&config,
 		expected.emplace_back(key, value);
 
 		/* verifies all elements */
-		verify_get_above(kv, MIN_KEY, i + 3, kv_sort(expected));
+		verify_get_above(kv, MIN_KEY, i + 3, sort(expected));
 
 		/* verifies elements from 2nd to last */
-		auto exp_sorted = kv_sort(expected);
+		auto exp_sorted = sort(expected);
 		verify_get_above(kv, exp_sorted[0].first, i + 2,
 				 kv_list(exp_sorted.begin() + 1, exp_sorted.end()));
 	}
 
 	CLEAR_KV(kv);
-	kv.close();
 }
 
-static void GetAboveIncrReverseTest(std::string engine, pmem::kv::config &&config,
-				    const size_t max_key_len)
+template <typename Comparator = pmemkv_default_comparator>
+static void GetAboveIncrReverseTest(pmem::kv::db &kv, const size_t max_key_len,
+				    std::function<kv_list(kv_list)> sort)
 {
 	/**
 	 * TEST: Generated keys with incremental keys, e.g. "A", "AA", ..., "B", "BB", ...
@@ -233,8 +217,6 @@ static void GetAboveIncrReverseTest(std::string engine, pmem::kv::config &&confi
 	 * data. After initial part of the test, some keys are deleted and some new keys
 	 * are added.
 	 */
-
-	auto kv = INITIALIZE_KV(engine, std::move(config));
 	verify_get_above(kv, "&Rev&", 0, kv_list());
 
 	/* generate keys and put them one at a time */
@@ -249,10 +231,10 @@ static void GetAboveIncrReverseTest(std::string engine, pmem::kv::config &&confi
 		expected.emplace_back(key, value);
 
 		/* verifies all elements */
-		verify_get_above(kv, MIN_KEY, keys_cnt - i + 1, kv_sort(expected));
+		verify_get_above(kv, MIN_KEY, keys_cnt - i + 1, sort(expected));
 
 		/* verifies elements above the first one */
-		auto exp_sorted = kv_sort(expected);
+		auto exp_sorted = sort(expected);
 		verify_get_above(kv, exp_sorted[0].first, keys_cnt - i,
 				 kv_list(exp_sorted.begin() + 1, exp_sorted.end()));
 	}
@@ -269,12 +251,12 @@ static void GetAboveIncrReverseTest(std::string engine, pmem::kv::config &&confi
 	keys_cnt--;
 
 	/* verifies above 11th element */
-	auto exp_sorted = kv_sort(expected);
+	auto exp_sorted = sort(expected);
 	verify_get_above_c(kv, exp_sorted[10].first, keys_cnt - 11,
 			   kv_list(exp_sorted.begin() + 11, exp_sorted.end()));
 
 	/* verifies all elements */
-	verify_get_above_c(kv, MIN_KEY, keys_cnt, kv_sort(expected));
+	verify_get_above_c(kv, MIN_KEY, keys_cnt, sort(expected));
 
 	/* remove 9th key */
 	UT_ASSERT(keys_cnt > 9);
@@ -286,7 +268,7 @@ static void GetAboveIncrReverseTest(std::string engine, pmem::kv::config &&confi
 	keys_cnt--;
 
 	/* verifies all elements */
-	verify_get_above_c(kv, MIN_KEY, keys_cnt, kv_sort(expected));
+	verify_get_above_c(kv, MIN_KEY, keys_cnt, sort(expected));
 
 	/* remove 3rd key */
 	UT_ASSERT(keys_cnt > 3);
@@ -298,40 +280,78 @@ static void GetAboveIncrReverseTest(std::string engine, pmem::kv::config &&confi
 	keys_cnt--;
 
 	/* verifies all elements */
-	verify_get_above_c(kv, MIN_KEY, keys_cnt, kv_sort(expected));
+	verify_get_above_c(kv, MIN_KEY, keys_cnt, sort(expected));
 
 	UT_ASSERTeq(kv.put("!@", "!@"), status::OK);
 	expected.emplace_back("!@", "!@");
 	keys_cnt++;
-	verify_get_above_c(kv, MIN_KEY, keys_cnt, kv_sort(expected));
+	verify_get_above_c(kv, MIN_KEY, keys_cnt, sort(expected));
 
 	UT_ASSERTeq(kv.put("<my_key>", "<my_key>"), status::OK);
 	expected.emplace_back("<my_key>", "<my_key>");
 	keys_cnt++;
-	verify_get_above_c(kv, MIN_KEY, keys_cnt, kv_sort(expected));
+	verify_get_above_c(kv, MIN_KEY, keys_cnt, sort(expected));
 
 	CLEAR_KV(kv);
-	kv.close();
 }
 
 static void test(int argc, char *argv[])
 {
-	if (argc < 3)
-		UT_FATAL("usage: %s engine json_config items max_key_len", argv[0]);
+	if (argc < 6)
+		UT_FATAL("usage: %s engine json_config comparator items max_key_len",
+			 argv[0]);
 
 	auto engine = std::string(argv[1]);
-	size_t items = std::stoull(argv[3]);
-	size_t max_key_len = std::stoull(argv[4]);
+	auto comparator = std::string(argv[3]);
+	size_t items = std::stoull(argv[4]);
+	size_t max_key_len = std::stoull(argv[5]);
 
 	auto seed = unsigned(std::time(0));
 	printf("rand seed: %u\n", seed);
 	std::srand(seed);
 
-	GetAboveTest(engine, CONFIG_FROM_JSON(argv[2]));
-	GetAboveTest2(engine, CONFIG_FROM_JSON(argv[2]));
-	GetAboveRandTest(engine, CONFIG_FROM_JSON(argv[2]), items, max_key_len);
-	GetAboveIncrTest(engine, CONFIG_FROM_JSON(argv[2]), max_key_len);
-	GetAboveIncrReverseTest(engine, CONFIG_FROM_JSON(argv[2]), max_key_len);
+	std::function<pmem::kv::config()> make_config;
+	std::function<kv_list(kv_list)> sort;
+
+	if (comparator == "default") {
+		sort = [&](kv_list list) { return kv_sort(list); };
+
+		make_config = [&] { return CONFIG_FROM_JSON(argv[2]); };
+	} else if (comparator == "reverse") {
+		sort = [&](kv_list list) { return kv_sort(list, reverse_comparator{}); };
+
+		make_config = [&] {
+			auto cfg = CONFIG_FROM_JSON(argv[2]);
+			UT_ASSERTeq(cfg.put_comparator(reverse_comparator{}), status::OK);
+
+			return cfg;
+		};
+	} else {
+		UT_FATAL("Unexpected comparator");
+	}
+
+	using namespace std::placeholders;
+
+	// XXX - comparator aware functions should be split to a separate file
+	if (comparator == "default") {
+		run_engine_tests(
+			engine, make_config,
+			{
+				GetAboveTest,
+				GetAboveTest2,
+				std::bind(GetAboveRandTest, _1, items, max_key_len, sort),
+				std::bind(GetAboveIncrTest, _1, max_key_len, sort),
+				std::bind(GetAboveIncrReverseTest, _1, max_key_len, sort),
+			});
+	} else {
+		run_engine_tests(
+			engine, make_config,
+			{
+				std::bind(GetAboveRandTest, _1, items, max_key_len, sort),
+				std::bind(GetAboveIncrTest, _1, max_key_len, sort),
+				std::bind(GetAboveIncrReverseTest, _1, max_key_len, sort),
+			});
+	}
 }
 
 int main(int argc, char *argv[])

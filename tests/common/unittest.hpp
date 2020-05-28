@@ -177,6 +177,28 @@ void CLEAR_KV(pmem::kv::db &kv)
 }
 
 #ifdef JSON_TESTS_SUPPORT
+static inline int run_engine_tests(std::string engine,
+				   std::function<pmem::kv::config()> make_config,
+				   std::vector<std::function<void(pmem::kv::db &)>> tests)
+{
+	test_register_sighandlers();
+
+	try {
+		auto kv = INITIALIZE_KV(engine, make_config());
+
+		for (auto &test : tests) {
+			test(kv);
+			CLEAR_KV(kv);
+		}
+	} catch (std::exception &e) {
+		UT_FATALexc(e);
+	} catch (...) {
+		UT_FATAL("catch(...){}");
+	}
+
+	return 0;
+}
+
 static inline int run_engine_tests(std::string engine, std::string json,
 				   std::vector<std::function<void(pmem::kv::db &)>> tests)
 {
