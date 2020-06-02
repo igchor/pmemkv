@@ -25,6 +25,9 @@ static constexpr std::size_t SLICE = 4;
 static constexpr std::size_t NIB = ((1ULL << SLICE) - 1);
 static constexpr std::size_t SLNODES = (1 << SLICE);
 
+using byten_t = uint32_t;
+using bitn_t = uint8_t;
+
 /**
  * Based on: https://github.com/pmem/pmdk/blob/master/src/libpmemobj/critnib.h
  */
@@ -39,17 +42,17 @@ public:
 	/*
 	 * insert -- write a key:value pair to the radix tree
 	 */
-	void insert(obj::pool_base &pop, uint64_t key, string_view value);
+	void insert(obj::pool_base &pop, string_view key, string_view value);
 
 	/*
 	 * get -- query for a key ("==" match)
 	 */
-	bool get(uint64_t key, pmemkv_get_v_callback *cb, void *arg);
+	bool get(string_view key, pmemkv_get_v_callback *cb, void *arg);
 
 	/*
 	 * remove -- delete a key from the radit tree return true if element was present
 	 */
-	bool remove(obj::pool_base &pop, uint64_t key);
+	bool remove(obj::pool_base &pop, string_view key);
 
 	/*
 	 * iterate -- iterate over all leafs
@@ -69,6 +72,7 @@ private:
 		tagged_node_ptr() = default;
 		tagged_node_ptr(const tagged_node_ptr &rhs) = default;
 		tagged_node_ptr(tagged_node_ptr &&rhs) = default;
+		tagged_node_ptr(std::nullptr_t);
 
 		tagged_node_ptr(uint64_t off);
 		tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr);
@@ -113,28 +117,34 @@ private:
 		 */
 		obj::shared_mutex mtx;
 		std::atomic<tagged_node_ptr> child[SLNODES];
-		obj::p<uint64_t> path;
-		obj::p<uint8_t> shift;
+		byten_t byte;
+		bitn_t bit;
 
-		uint8_t padding[256 - sizeof(mtx) - sizeof(child) - sizeof(path) -
-				sizeof(shift)];
+		uint8_t padding[256 - sizeof(mtx) - sizeof(child) - sizeof(byte) -
+				sizeof(bit)];
 	};
 
 	static_assert(sizeof(node) == 256, "Wrong node size");
 
 	struct leaf {
-		leaf(uint64_t key, string_view value);
+		leaf(string_view key, string_view value);
 
 		const char *data() const noexcept;
-		const char *cdata() const noexcept;
+		const char *key() const noexcept;
 
 		std::size_t capacity();
 
-		obj::p<uint64_t> key;
-		obj::p<uint64_t> value_size;
+		obj::p<uint64_t> vsize;
+		obj::p<uint64_t> ksize;
 
 	private:
-		char *data();
+		char *data_rw();
+	};
+
+	struct key_t {
+		key_t(string_view key);
+
+		uint64_t ksize;
 	};
 
 	obj::shared_mutex root_mtx;
@@ -142,16 +152,12 @@ private:
 	std::atomic<uint64_t> size_;
 	uint64_t pool_id = 0;
 
-	/*
-	 * internal: path_mask -- return bit mask of a path above a subtree [shift]
-	 * bits tall
-	 */
-	uint64_t path_mask(uint8_t shift);
+	tree::leaf *any_leaf(tagged_node_ptr n);
 
 	/*
 	 * internal: slice_index -- return index of child at the given nib
 	 */
-	unsigned slice_index(uint64_t key, uint8_t shift);
+	unsigned slice_index(char k, uint8_t shift);
 
 	/*
 	 * internal: delete_node -- recursively free (to malloc) a subtree

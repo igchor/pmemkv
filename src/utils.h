@@ -15,9 +15,14 @@ namespace internal
 namespace utils
 {
 
-static inline uint64_t mssb_index64(std::size_t value)
+static inline uint8_t mssb_index64(uint64_t value)
 {
-	return ((unsigned char)(63 - __builtin_clzll(value)));
+	return ((uint8_t)(63 - __builtin_clzll(value)));
+}
+
+static inline uint8_t mssb_index(uint32_t value)
+{
+	return ((uint8_t)(31 - __builtin_clz(value)));
 }
 
 }

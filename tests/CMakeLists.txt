@@ -1312,33 +1312,29 @@ if(ENGINE_RADIX)
 			TRACERS none memcheck #pmemcheck
 			SCRIPT pmemobj_based/persistent/insert_check.cmake)
 
-	# Expects no limit for key length
-	# add_engine_test(ENGINE radix
-	# BINARY persistent_put_verify_asc_params
-	# TRACERS none #memcheck pmemcheck
-	# SCRIPT pmemobj_based/persistent/insert_check.cmake
-	# DB_SIZE 1G PARAMS 6000)
+	add_engine_test(ENGINE radix
+			BINARY persistent_put_verify_asc_params
+			TRACERS none #memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake
+			DB_SIZE 1G PARAMS 6000)
 
-	# Expects no limit for key length
-	# add_engine_test(ENGINE radix
-	# BINARY persistent_put_verify_asc_params
-	# TRACERS none #memcheck pmemcheck
-	# SCRIPT pmemobj_based/persistent/insert_check.cmake
-	# DB_SIZE 1G PARAMS 3906) # 3906 is limit for one inner node
+	add_engine_test(ENGINE radix
+			BINARY persistent_put_verify_asc_params
+			TRACERS none #memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake
+			DB_SIZE 1G PARAMS 3906)
 
-	# Expects no limit for key length
-	# add_engine_test(ENGINE radix
-	# BINARY persistent_put_verify_desc_params
-	# TRACERS none #memcheck pmemcheck
-	# SCRIPT pmemobj_based/persistent/insert_check.cmake
-	# DB_SIZE 1G PARAMS 6000)
+	add_engine_test(ENGINE radix
+			BINARY persistent_put_verify_desc_params
+			TRACERS none #memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake
+			DB_SIZE 1G PARAMS 6000)
 
-	# Expects no limit for key length
-	# add_engine_test(ENGINE radix
-	# BINARY persistent_put_verify_desc_params
-	# TRACERS none #memcheck pmemcheck
-	# SCRIPT pmemobj_based/persistent/insert_check.cmake
-	# DB_SIZE 1G PARAMS 3906) # 3906 is limit for one inner node
+	add_engine_test(ENGINE radix
+			BINARY persistent_put_verify_desc_params
+			TRACERS none #memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake
+			DB_SIZE 1G PARAMS 3906)
 
 	add_engine_test(ENGINE radix
 			BINARY pmemobj_error_handling_oom
@@ -1389,6 +1385,35 @@ if(ENGINE_RADIX)
 			TRACERS none memcheck #pmemcheck
 			SCRIPT pmemobj_based/pmemobj/put_get_std_map_force_create.cmake
 			PARAMS 1000 8 200)
+
+	add_engine_test(ENGINE radix
+			BINARY put_get_remove_charset_params
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 16 8)
+
+	add_engine_test(ENGINE radix
+			BINARY put_get_remove_long_key
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE radix
+			BINARY put_get_remove_params
+			TRACERS none
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 4G PARAMS 400000)
+
+	add_engine_test(ENGINE radix
+			BINARY put_get_remove_params
+			TRACERS memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 1G PARAMS 4000)
+
+	add_engine_test(ENGINE radix
+			BINARY put_get_std_map
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 1000 100 200)
 
 	# XXX - enable
 	# add_engine_test(ENGINE radix
