@@ -91,6 +91,8 @@ private:
 		tree::leaf *get_leaf(uint64_t) const;
 		tree::node *get_node(uint64_t) const;
 
+		tree::node *operator->() const noexcept;
+
 		uint64_t offset() const;
 
 		explicit operator bool() const noexcept;
@@ -100,37 +102,22 @@ private:
 	};
 
 	struct node {
-		/*
-		 * path is the part of a tree that's already traversed (be it through
-		 * explicit nodes or collapsed links) -- ie, any subtree below has all
-		 * those bits set to this value.
-		 *
-		 * nib is a 4-bit slice that's an index into the node's children.
-		 *
-		 * shift is the length (in bits) of the part of the key below this node.
-		 *
-		 *            nib
-		 * |XXXXXXXXXX|?|*****|
-		 *    path      ^
-		 *              +-----+
-		 *               shift
-		 */
-		obj::shared_mutex mtx;
-		std::atomic<tagged_node_ptr> child[SLNODES];
+		tagged_node_ptr child[SLNODES];
+		tagged_node_ptr leaf = nullptr; // -> ptr<leaf>
 		byten_t byte;
 		bitn_t bit;
 
-		uint8_t padding[256 - sizeof(mtx) - sizeof(child) - sizeof(byte) -
-				sizeof(bit)];
+		// uint8_t padding[256 - sizeof(mtx) - sizeof(child) - sizeof(byte) -
+		// 		sizeof(bit)];
 	};
 
-	static_assert(sizeof(node) == 256, "Wrong node size");
+	// static_assert(sizeof(node) == 256, "Wrong node size");
 
 	struct leaf {
 		leaf(string_view key, string_view value);
 
 		const char *data() const noexcept;
-		const char *key() const noexcept;
+		string_view key() const noexcept;
 
 		std::size_t capacity();
 
@@ -141,18 +128,12 @@ private:
 		char *data_rw();
 	};
 
-	struct key_t {
-		key_t(string_view key);
-
-		uint64_t ksize;
-	};
-
-	obj::shared_mutex root_mtx;
-	std::atomic<tagged_node_ptr> root;
-	std::atomic<uint64_t> size_;
+	tagged_node_ptr root;
+	uint64_t size_;
 	uint64_t pool_id = 0;
 
-	tree::leaf *any_leaf(tagged_node_ptr n);
+	leaf *any_leaf(tagged_node_ptr n);
+	leaf* descend(string_view key);
 
 	/*
 	 * internal: slice_index -- return index of child at the given nib

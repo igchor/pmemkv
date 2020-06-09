@@ -23,7 +23,8 @@ static void check(const size_t iterations, pmem::kv::db &kv)
 	for (size_t i = 1; i <= iterations; i++) {
 		std::string istr = std::to_string(i);
 		std::string value;
-		UT_ASSERT(kv.get(istr, &value) == status::OK && value == (istr + "!"));
+		kv.get(istr, &value) == status::OK;
+		value == (istr + "!");
 	}
 	std::size_t cnt = std::numeric_limits<std::size_t>::max();
 	UT_ASSERT(kv.count_all(cnt) == status::OK);

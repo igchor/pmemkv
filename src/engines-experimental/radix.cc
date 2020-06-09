@@ -26,6 +26,8 @@ namespace internal
 namespace radix
 {
 
+static uint64_t g_pool_id;
+
 tree::leaf::leaf(string_view key, string_view value) : ksize(key.size()), vsize(value.size())
 {
 	std::memcpy(this->data_rw(), key.data(), key.size());
@@ -35,17 +37,14 @@ tree::leaf::leaf(string_view key, string_view value) : ksize(key.size()), vsize(
 
 const char *tree::leaf::data() const noexcept
 {
-	return key() + ksize;
+	return key().data() + key().size();
 }
 
-const char *tree::leaf::key() const noexcept
+string_view tree::leaf::key() const noexcept
 {
-	return reinterpret_cast<const char *>(this + 1);
-}
+	auto data = reinterpret_cast<const char *>(this + 1);
 
-std::size_t tree::leaf::capacity()
-{
-	return pmemobj_alloc_usable_size(pmemobj_oid(this)) - sizeof(this) - ksize;
+	return string_view(data, ksize);
 }
 
 char *tree::leaf::data_rw()
@@ -58,11 +57,13 @@ char *tree::leaf::data_rw()
 tree::tree() : root(nullptr), size_(0)
 {
 	pool_id = pmemobj_oid(this).pool_uuid_lo;
+
+	g_pool_id = pool_id; // XXx:
 }
 
 tree::~tree()
 {
-	if (root.load(std::memory_order_acquire))
+	if (root)
 		delete_node(root);
 }
 
@@ -112,11 +113,6 @@ struct actions {
 			throw std::runtime_error("XXX");
 	}
 
-	void cancel()
-	{
-		pmemobj_cancel(pop.handle(), acts.data(), acts.size());
-	}
-
 private:
 	std::vector<pobj_action> acts;
 	obj::pool_base pop;
@@ -136,46 +132,15 @@ tree::leaf *tree::any_leaf(tagged_node_ptr n)
 		if ((m = n.get_node(pool_id)->child[i]))
 			return m.is_leaf() ? m.get_leaf(pool_id) : any_leaf(m);
 	}
-	return NULL;
+	assert(false);
 }
 
-/**
- * We first find a position for a new leaf without any locks, then lock the
- * potential parent and insert/replace the leaf. Reading key from leafs
- * is always done under the parent lock.
- */
-void tree::insert(obj::pool_base &pop, string_view view_key, string_view value)
+tree::leaf *tree::descend(string_view key)
 {
-restart : {
-	actions acts(pop, pool_id);
+	auto n = root;
 
-	tagged_node_ptr leaf = acts.make<tree::leaf>(
-			sizeof(tree::leaf) + value.size() + view_key.size(), view_key, value);
-
-	auto key = (const char*) &leaf.get_leaf(pool_id)->ksize;
-	auto key_len = view_key.size() + sizeof(uint64_t);
-
-	auto n = root.load(std::memory_order_acquire);
-	auto *parent = &root;
-
-	if (!n) {
-		// std::unique_lock<obj::shared_mutex> lock(root_mtx);
-
-		// if (n != root.load(std::memory_order_relaxed))
-		// 	goto restart;
-
-		// XXX - move size to TLS
-		size_++;
-
-		acts.set((uint64_t *)&root, leaf.offset());
-		acts.publish();
-
-		return;
-	}
-
-	while (!n.is_leaf() && n.get_node(pool_id)->byte < key_len) {
-		parent = &n.get_node(pool_id)->child[slice_index(key[n.get_node(pool_id)->byte],  n.get_node(pool_id)->bit)];
-		auto nn = parent->load();
+	while (!n.is_leaf() && n->byte < key.size()) {
+		auto nn = n->child[slice_index(key.data()[n->byte],  n->bit)];
 
 		if (nn)
 			n = nn;
@@ -185,172 +150,204 @@ restart : {
 		}
 	}
 
-	assert(n);
 	if (!n.is_leaf())
 		n = any_leaf(n);
 
-	assert(n);
-	assert(n.is_leaf());
+	return n.get_leaf(pool_id);
+}
 
-	auto nk_len = n.get_leaf(pool_id)->ksize + sizeof(uint64_t);
-
-	byten_t common_len = nk_len < key_len ? nk_len : key_len;
-
-	auto nkey = (const char*) &n.get_leaf(pool_id)->ksize;
-
+static byten_t prefix_diff(string_view lhs, string_view rhs)
+{
 	byten_t diff;
-	for (diff = 0; diff < common_len; diff++) {
-		if (nkey[diff] != key[diff])
-			break;
+	for (diff = 0; diff < std::min(lhs.size(), rhs.size()); diff++) {
+		if (lhs.data()[diff] != rhs.data()[diff])
+			return diff;
 	}
 
-	if (diff >= common_len) {
-		// auto &mtx = parent == &root ? root_mtx : prev.get_node(pool_id)->mtx;
-		// std::unique_lock<obj::shared_mutex> lock(mtx);
+	return diff;
+}
 
-		// /* this means that there was some concurrent insert */
-		// if (n != parent->load(std::memory_order_relaxed))
-		// 	goto restart;
+void tree::insert(obj::pool_base &pop, string_view key, string_view value)
+{
+	actions acts(pop, pool_id);
 
-		// tagged_node_ptr leaf = acts.make<tree::leaf>(
-		// 	sizeof(tree::leaf) + key.size() + value.size(), key, value);
-		// acts.set((uint64_t *)parent, leaf.offset());
-		// acts.free(n.offset());
+	tagged_node_ptr new_leaf = acts.make<tree::leaf>(
+			sizeof(tree::leaf) + value.size() + key.size(), key, value);
 
-		// acts.publish();
-
-		acts.set((uint64_t *)parent, leaf.offset());
+	if (!root) {
+		acts.set((uint64_t *)&root, new_leaf.offset());
+		acts.set(&size_, size_ + 1);
 		acts.publish();
 
 		return;
 	}
 
-	/* Calculate the divergence point within the single byte. */
-	char at = nkey[diff] ^ key[diff];
-	bitn_t sh = utils::mssb_index((uint32_t)at) & (bitn_t)~(SLICE - 1);
+	/*
+	 * Need to descend the tree twice: first to find a leaf that
+	 * represents a subtree whose all keys share a prefix at least as
+	 * long as the one common to the new key and that subtree.
+	 */
+	auto leaf = descend(key);
+	auto diff = prefix_diff(key, leaf->key());
 
 	/* Descend into the tree again. */
-	n = root.load(std::memory_order_acquire);
-	parent = &root;
-
-	while (n && !n.is_leaf() &&
-			(n.get_node(pool_id)->byte < diff || (n.get_node(pool_id)->byte == diff && n.get_node(pool_id)->bit >= sh))) {
-		parent = &n.get_node(pool_id)->child[slice_index(key[n.get_node(pool_id)->byte], n.get_node(pool_id)->bit)];
-		n = parent->load(std::memory_order_acquire);
-	}
-
-	/*
-	 * If the divergence point is at same nib as an existing node, and
-	 * the subtree there is empty, just place our leaf there and we're
-	 * done.  Obviously this can't happen if SLICE == 1.
-	 */
-	if (!n) {
-		acts.set((uint64_t *)parent, leaf.offset());
-		acts.publish();
-		size_++;
-		return;
-	}
-
-	/* If not, we need to insert a new node in the middle of an edge. */
-	tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
-
-	auto node_ptr = node.get_node(pool_id);
-	node_ptr->child[slice_index(nkey[diff], sh)].store(n, std::memory_order_relaxed);
-	node_ptr->child[slice_index(key[diff], sh)].store(leaf, std::memory_order_relaxed);
-	node_ptr->byte = diff;
-	node_ptr->bit = sh;
-
-	acts.set((uint64_t *)parent, node.offset());
-
-	// XXX - move size to TLS
-	size_++;
-
-	acts.publish();
-}
-}
-
-bool tree::get(string_view view_key, pmemkv_get_v_callback *cb, void *arg)
-{
-	// XXX
-	auto kkk = view_key.size();
-	auto key = (char *)malloc(sizeof(uint64_t) + view_key.size());
-	std::memcpy(key, &kkk, sizeof(uint64_t));
-	std::memcpy(key + sizeof(uint64_t), view_key.data(), view_key.size());
-
-	auto key_len = view_key.size() + sizeof(uint64_t);
-
-restart : {
-	auto n = root.load(std::memory_order_acquire);
-	//auto prev = n;
+	auto n = root;
 	auto parent = &root;
 
-	/*
-	 * critbit algorithm: dive into the tree, looking at nothing but
-	 * each node's critical bit^H^H^Hnibble.  This means we risk
-	 * going wrong way if our path is missing, but that's ok...
-	 */
-	while (n && !n.is_leaf()) {
-		if (n.get_node(pool_id)->byte >= key_len)
-			return false;
+	if (diff == key.size()) {
+		/* key is a prefix of leaf->key() */
 
-		//prev = n;
-		parent = &n.get_node(pool_id)
-				  ->child[slice_index(key[n.get_node(pool_id)->byte], n.get_node(pool_id)->bit)];
-		n = parent->load(std::memory_order_acquire);
+		while (n && !n.is_leaf() && n->byte < diff) {
+			parent = &n->child[slice_index(key.data()[n->byte], n->bit)];
+			n = *parent;
+		}
+
+		assert(n);
+
+		if (n.is_leaf() && key.size() == n.get_leaf(pool_id)->key().size()) {
+#ifndef NDEBUG
+ 			assert(key.compare(n.get_leaf(pool_id)->key()) == 0);
+#endif
+
+			acts.free(n.offset());
+			acts.set((uint64_t*) parent, new_leaf.offset());
+			acts.publish();
+
+			return;
+			
+		} else if (!n.is_leaf() && n->byte == key.size()) {
+			/* path from root to n is exactly key */
+#ifndef NDEBUG
+ 		if (n->leaf)
+ 			assert(key.compare(n->leaf.get_leaf(pool_id)->key()) == 0);
+#endif
+
+			acts.free(n->leaf.offset());
+			acts.set((uint64_t*) &n->leaf, new_leaf.offset());
+			acts.publish();
+
+			return;
+		} else {
+			/* If not, we need to insert a new node in the middle of an edge. */
+			tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
+			node->child[slice_index(leaf->key().data()[diff], 0)] = n; // XXX?
+			node->leaf =  new_leaf;
+			node->byte = diff;
+			node->bit = 0;
+
+			acts.set((uint64_t *)parent, node.offset());
+			acts.set(&size_, size_ + 1);
+			acts.publish();
+
+			return;
+		}
+	} else if (diff == leaf->key().size()) {
+		/* leaf->key() is a prefix of key. We need to convert leaf to a node */
+
+		tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
+		node->child[slice_index(key.data()[diff], 0)] = new_leaf;
+		node->leaf =  n;
+		node->byte = diff;
+		node->bit = 0;
+
+		acts.set((uint64_t *)parent, node.offset());
+		acts.set(&size_, size_ + 1);
+		acts.publish();
+
+		return;
+	} else {
+		/* Calculate the divergence point within the single byte. */
+		char at = leaf->key().data()[diff] ^ key.data()[diff];
+		bitn_t sh = utils::mssb_index((uint32_t)at) & (bitn_t)~(SLICE - 1);
+
+		while (n && !n.is_leaf() &&
+			(n->byte < diff || (n->byte == diff && n->bit >= sh))) {
+		
+			parent = &n->child[slice_index(key.data()[n->byte], n->bit)];
+			n = *parent;
+		}
+
+		/*
+		* If the divergence point is at same nib as an existing node, and
+		* the subtree there is empty, just place our leaf there and we're
+		* done.  Obviously this can't happen if SLICE == 1.
+		*/
+		if (!n) {
+			acts.set((uint64_t *)parent, new_leaf.offset());
+			acts.set(&size_, size_ + 1);
+			acts.publish();
+			return;
+		}
+
+		/* If not, we need to insert a new node in the middle of an edge. */
+		tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
+
+		node->child[slice_index(leaf->key().data()[diff], sh)] = n;
+		node->child[slice_index(key.data()[diff], sh)] =  new_leaf;
+		node->byte = diff;
+		node->bit = sh;
+
+		acts.set((uint64_t *)parent, node.offset());
+		acts.set(&size_, size_ + 1);
+		acts.publish();
+	}
+}
+
+bool tree::get(string_view key, pmemkv_get_v_callback *cb, void *arg)
+{
+	auto n = root;
+	while (n && !n.is_leaf()) {
+		if (n->byte == key.size())
+			n = n->leaf;
+		else if (n->byte > key.size())
+			return false;
+		else
+			n = n->child[slice_index(key.data()[n->byte], n->bit)];
 	}
 
-	// auto &mtx = parent == &root ? root_mtx : prev.get_node(pool_id)->mtx;
-	// std::shared_lock<obj::shared_mutex> lock(mtx);
-
-	// /* Concurrent erase could have inserted extra node at leaf position */
-	// if (n != parent->load(std::memory_order_relaxed))
-	// 	goto restart;
-
-	if (!n || view_key.compare(string_view(n.get_leaf(pool_id)->key(), n.get_leaf(pool_id)->ksize)) != 0)
+	if (!n)
 		return false;
 
-	cb(n.get_leaf(pool_id)->data(), n.get_leaf(pool_id)->vsize, arg);
+	auto leaf = n.get_leaf(pool_id);
+	if (key.compare(leaf->key()) != 0)
+		return false;
+
+	cb(leaf->data(), leaf->vsize, arg);
 
 	return true;
 }
-}
 
-bool tree::remove(obj::pool_base &pop, string_view view_key)
+bool tree::remove(obj::pool_base &pop, string_view key)
 {
-	// XXX
-	auto kkk = view_key.size();
-	auto key = (char *)malloc(sizeof(uint64_t) + view_key.size());
-	std::memcpy(key, &kkk, sizeof(uint64_t));
-	std::memcpy(key + sizeof(uint64_t), view_key.data(), view_key.size());
-
-	auto key_len = view_key.size() + sizeof(uint64_t);
-
 	actions acts(pop, pool_id);
 
-	auto n = root.load(std::memory_order_acquire);
+	auto n = root;
 	auto *parent = &root;
 	decltype(parent) pp = nullptr;
 
 	while (n && !n.is_leaf()) {
-		if (n.get_node(pool_id)->byte >= key_len)
-			return false;
-
 		pp = parent;
-		parent = &n.get_node(pool_id)
-				  ->child[slice_index(key[n.get_node(pool_id)->byte], n.get_node(pool_id)->bit)];
-		n = parent->load(std::memory_order_acquire);
+
+		if (n->byte == key.size())
+			parent = &n->leaf;
+		else if (n->byte > key.size())
+			return false;
+		else
+			parent = &n->child[slice_index(key.data()[n->byte], n->bit)];
+
+		n = *parent;
 	}
 
-	if (!n || key_len != n.get_leaf(pool_id)->ksize + sizeof(uint64_t) || view_key.compare(string_view(n.get_leaf(pool_id)->key(), n.get_leaf(pool_id)->ksize)) != 0)
+	if (!n)
 		return false;
 
-	{
-			acts.free(n.offset());
-	 		acts.set((uint64_t *)parent, 0);
+	auto leaf = n.get_leaf(pool_id);
+	if (key.compare(leaf->key()) != 0)
+		return false;
 
-			// XXX
-			size_--;
-	}
+	acts.free(n.offset());
+	acts.set((uint64_t *)parent, 0);
+	acts.set(&size_, size_ - 1);
 
 	/* was root */
 	if (!pp) {
@@ -358,23 +355,30 @@ bool tree::remove(obj::pool_base &pop, string_view view_key)
 		return true;
 	}
 
-		n = pp->load();
+		n = *pp;
 		tagged_node_ptr only_child = nullptr;
 		for (int i = 0; i < (int)SLNODES; i++) {
-			auto &child = n.get_node(pool_id)->child[i];
-			if (child.load() && &child != parent) {
+			auto &child = n->child[i];
+			if (child && &child != parent) {
 				if (only_child) {
+					/* more than one child */
 					acts.publish();
 					return true;
 				}
-				only_child = n.get_node(pool_id)->child[i].load();
+				only_child = n->child[i];
 			}
 		}
+
+		if (only_child && n->leaf) {
+			acts.publish();
+			return true;
+		} else if (n->leaf)
+			only_child = n->leaf;
 
 	assert(only_child);
 
 	acts.set((uint64_t *)pp, only_child.offset());
-	acts.free(n.offset()); // XXX = & ~1 ?
+	acts.free(n.offset());
 
 	acts.publish();
 
@@ -385,32 +389,20 @@ void tree::iterate_rec(tree::tagged_node_ptr n, pmemkv_get_kv_callback *callback
 		       void *arg)
 {
 	if (!n.is_leaf()) {
-		// auto &mtx = n == root.load(std::memory_order_acquire)
-		// 	? root_mtx
-		// 	: n.get_node(pool_id)->mtx;
-
-		// /*
-		//  * Keep locks on every level from root to leaf's parent. This simplifies
-		//  * synchronization with concurrent inserts.
-		//  */
-		// std::shared_lock<obj::shared_mutex> lock(mtx);
-
 		for (int i = 0; i < (int)SLNODES; i++) {
-			auto child = n.get_node(pool_id)->child[i].load(
-				std::memory_order_relaxed);
-			if (child)
-				iterate_rec(child, callback, arg);
+			if (n->child[i])
+				iterate_rec(n->child[i], callback, arg);
 		}
 	} else {
 		auto leaf = n.get_leaf(pool_id);
-		callback(leaf->key(), leaf->ksize, leaf->data(),
+		callback(leaf->key().data(), leaf->key().size(), leaf->data(),
 			 leaf->vsize, arg);
 	}
 }
 
 void tree::iterate(pmemkv_get_kv_callback *callback, void *arg)
 {
-	if (root.load(std::memory_order_acquire))
+	if (root)
 		iterate_rec(root, callback, arg);
 }
 
@@ -425,7 +417,7 @@ void tree::delete_node(tree::tagged_node_ptr n)
 
 	if (!n.is_leaf()) {
 		for (int i = 0; i < (int)SLNODES; i++) {
-			if (n.get_node(pool_id)->child[i].load(std::memory_order_relaxed))
+			if (n->child[i])
 				delete_node(n.get_node(pool_id)->child[i]);
 		}
 		obj::delete_persistent<tree::node>(n.get_node(pool_id));
@@ -512,6 +504,11 @@ tree::tagged_node_ptr::operator bool() const noexcept
 	return off != 0;
 }
 
+tree::node *tree::tagged_node_ptr::operator->() const noexcept
+{
+	return get_node(g_pool_id);
+}
+
 } // namespace radix
 } // namespace internal
 
@@ -528,6 +525,8 @@ radix::radix(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg)
 				*root_oid);
 		});
 	}
+
+	pmem::kv::internal::radix::g_pool_id = root_oid->pool_uuid_lo;
 }
 
 radix::~radix()
