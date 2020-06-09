@@ -194,43 +194,41 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 	auto n = root;
 	auto parent = &root;
 
+	bitn_t sh;
+	if (diff < leaf->key().size() && diff < key.size()) {
+		char at = leaf->key().data()[diff] ^ key.data()[diff];
+		sh = utils::mssb_index((uint32_t)at) & (bitn_t)~(SLICE - 1);
+	} else {
+		sh = 0;
+	}
+
+	while (n && !n.is_leaf() &&
+		(n->byte < diff || (n->byte == diff && n->bit >= sh))) {
+		
+		parent = &n->child[slice_index(key.data()[n->byte], n->bit)];
+		n = *parent;
+	}
+
+	/*
+	* If the divergence point is at same nib as an existing node, and
+	* the subtree there is empty, just place our leaf there and we're
+	* done.  Obviously this can't happen if SLICE == 1.
+	*/
+	if (!n) {
+		assert(diff < leaf->key().size() && diff < key.size());
+
+		acts.set((uint64_t *)parent, new_leaf.offset());
+		acts.set(&size_, size_ + 1);
+		acts.publish();
+		return;
+	}
+
+	/* New key is a prefix of the leaf key or they are equal. We need to add leaf ptr to internal node. */
 	if (diff == key.size()) {
-		/* key is a prefix of leaf->key() */
-
-		while (n && !n.is_leaf() && n->byte < diff) {
-			parent = &n->child[slice_index(key.data()[n->byte], n->bit)];
-			n = *parent;
-		}
-
-		assert(n);
-
-		if (n.is_leaf() && key.size() == n.get_leaf(pool_id)->key().size()) {
-#ifndef NDEBUG
- 			assert(key.compare(n.get_leaf(pool_id)->key()) == 0);
-#endif
-
-			acts.free(n.offset());
-			acts.set((uint64_t*) parent, new_leaf.offset());
-			acts.publish();
-
-			return;
-			
-		} else if (!n.is_leaf() && n->byte == key.size()) {
-			/* path from root to n is exactly key */
-#ifndef NDEBUG
- 		if (n->leaf)
- 			assert(key.compare(n->leaf.get_leaf(pool_id)->key()) == 0);
-#endif
-
-			acts.free(n->leaf.offset());
-			acts.set((uint64_t*) &n->leaf, new_leaf.offset());
-			acts.publish();
-
-			return;
-		} else {
-			/* If not, we need to insert a new node in the middle of an edge. */
+		if ((!n.is_leaf() && n->byte != diff) || (n.is_leaf() && n.get_leaf(pool_id)->key().compare(key) != 0)) {
+			/* We have to add new node at the edge from parent to n */
 			tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
-			node->child[slice_index(leaf->key().data()[diff], 0)] = n; // XXX?
+			node->child[slice_index(leaf->key().data()[diff], 0)] = n;
 			node->leaf =  new_leaf;
 			node->byte = diff;
 			node->bit = 0;
@@ -240,9 +238,25 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 			acts.publish();
 
 			return;
+		} else {
+			/* Update of existing element. */
+			assert(n.is_leaf() || !n->leaf || n->leaf.get_leaf(pool_id)->key().compare(key) == 0);
+
+			if (!n.is_leaf()) {
+				parent = &n->leaf;
+				n = *parent;
+			}
+
+			acts.free(n.offset());
+			acts.set((uint64_t*) parent, new_leaf.offset());
+			acts.publish();
+
+			return;
 		}
-	} else if (diff == leaf->key().size()) {
-		/* leaf->key() is a prefix of key. We need to convert leaf to a node */
+	}
+
+	if (diff == leaf->key().size()) {
+		/* Leaf key is a prefix of the new key. We need to convert leaf to a node. */
 
 		tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
 		node->child[slice_index(key.data()[diff], 0)] = new_leaf;
@@ -255,42 +269,19 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 		acts.publish();
 
 		return;
-	} else {
-		/* Calculate the divergence point within the single byte. */
-		char at = leaf->key().data()[diff] ^ key.data()[diff];
-		bitn_t sh = utils::mssb_index((uint32_t)at) & (bitn_t)~(SLICE - 1);
-
-		while (n && !n.is_leaf() &&
-			(n->byte < diff || (n->byte == diff && n->bit >= sh))) {
-		
-			parent = &n->child[slice_index(key.data()[n->byte], n->bit)];
-			n = *parent;
-		}
-
-		/*
-		* If the divergence point is at same nib as an existing node, and
-		* the subtree there is empty, just place our leaf there and we're
-		* done.  Obviously this can't happen if SLICE == 1.
-		*/
-		if (!n) {
-			acts.set((uint64_t *)parent, new_leaf.offset());
-			acts.set(&size_, size_ + 1);
-			acts.publish();
-			return;
-		}
-
-		/* If not, we need to insert a new node in the middle of an edge. */
-		tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
-
-		node->child[slice_index(leaf->key().data()[diff], sh)] = n;
-		node->child[slice_index(key.data()[diff], sh)] =  new_leaf;
-		node->byte = diff;
-		node->bit = sh;
-
-		acts.set((uint64_t *)parent, node.offset());
-		acts.set(&size_, size_ + 1);
-		acts.publish();
 	}
+
+	/* If not, we need to insert a new node in the middle of an edge. */
+	tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
+
+	node->child[slice_index(leaf->key().data()[diff], sh)] = n;
+	node->child[slice_index(key.data()[diff], sh)] =  new_leaf;
+	node->byte = diff;
+	node->bit = sh;
+
+	acts.set((uint64_t *)parent, node.offset());
+	acts.set(&size_, size_ + 1);
+	acts.publish();
 }
 
 bool tree::get(string_view key, pmemkv_get_v_callback *cb, void *arg)
