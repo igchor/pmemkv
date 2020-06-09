@@ -9,6 +9,8 @@
 #include <libpmemobj++/pool.hpp>
 #include <libpmemobj++/shared_mutex.hpp>
 
+#include <libpmemobj++/container/string.hpp>
+
 #include <atomic>
 #include <shared_mutex>
 
@@ -121,12 +123,27 @@ private:
 
 		std::size_t capacity();
 
-		obj::p<uint64_t> vsize;
-		obj::p<uint64_t> ksize;
+		// obj::p<uint64_t> vsize;
+		// obj::p<uint64_t> ksize;
+
+		pmem::obj::string key_;
+		pmem::obj::string value;
 
 	private:
 		char *data_rw();
 	};
+
+	int n_child(tagged_node_ptr n) {
+		int num = 0;
+		for (int i = 0; i < (int)SLNODES; i++) {
+			auto &child = n->child[i];
+			if (child) {
+				num++;
+			}
+		}
+
+		return num;
+	}
 
 	tagged_node_ptr root;
 	uint64_t size_;
