@@ -28,7 +28,10 @@ namespace radix
 
 static uint64_t g_pool_id;
 
-tree::leaf::leaf(string_view key, string_view value): key_(key.data(), key.size()), value(value.data(), value.size()) {}
+tree::leaf::leaf(string_view key, string_view value)
+    : key_(key.data(), key.size()), value(value.data(), value.size())
+{
+}
 //: ksize(key.size()), vsize(value.size())
 // {
 // 	std::memcpy(this->data_rw(), key.data(), key.size());
@@ -111,14 +114,15 @@ struct actions {
 
 		auto ptr = pmem::obj::persistent_ptr<T>(pmemobj_tx_alloc(size, 0));
 
-		new(ptr.get()) T(std::forward<Args>(args)...);
+		new (ptr.get()) T(std::forward<Args>(args)...);
 
 		return ptr;
 	}
 
 	void publish()
 	{
-		// /* XXX - this probably won't work if there is no operation on std::atomic
+		// /* XXX - this probably won't work if there is no operation on
+		// std::atomic
 		//  */
 		// std::atomic_thread_fence(std::memory_order_release);
 
@@ -157,7 +161,7 @@ tree::leaf *tree::descend(string_view key)
 	auto n = root;
 
 	while (!n.is_leaf() && n->byte < key.size()) {
-		auto nn = n->child[slice_index(key.data()[n->byte],  n->bit)];
+		auto nn = n->child[slice_index(key.data()[n->byte], n->bit)];
 
 		if (nn)
 			n = nn;
@@ -184,14 +188,16 @@ static byten_t prefix_diff(string_view lhs, string_view rhs)
 	return diff;
 }
 
+// XXXXXXX - add tests in which we isert keys which are shorter than existing ones!!!!
 void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 {
 	actions acts(pop, pool_id);
 
-	iterate([](const char*, size_t, const char*, size_t, void*){return 0;}, nullptr);
+	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
+		nullptr);
 
 	tagged_node_ptr new_leaf = acts.make<tree::leaf>(
-			sizeof(tree::leaf) + value.size() + key.size(), key, value);
+		sizeof(tree::leaf) + value.size() + key.size(), key, value);
 
 	if (!root) {
 		acts.set((uint64_t *)&root, new_leaf.offset());
@@ -214,15 +220,15 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 	auto parent = &root;
 	auto prev = n;
 
-	bitn_t sh = std::numeric_limits<bitn_t>::max(); // XXX - the loop below will stop if we find node with exactly matching nbyte and nbit
+	bitn_t sh = 4; // XXX 4 to some constant
 	if (diff < leaf->key().size() && diff < key.size()) {
 		unsigned char at = leaf->key().data()[diff] ^ key.data()[diff];
-		sh = utils::mssb_index((uint32_t)at) & (bitn_t)~(SLICE - 1);
+		sh = utils::mssb_index((uint32_t)at) & (bitn_t) ~(SLICE - 1);
 	}
 
 	auto byte = 0;
 	while (n && !n.is_leaf() &&
-		(n->byte < diff || (n->byte == diff && n->bit >= sh))) {
+	       (n->byte < diff || (n->byte == diff && n->bit >= sh))) {
 		assert(n->byte * 8 + (8 - n->bit) > byte);
 		assert(n->bit == 0 || n->bit == 4);
 		byte = n->byte * 8 + (8 - n->bit) > byte;
@@ -233,10 +239,10 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 	}
 
 	/*
-	* If the divergence point is at same nib as an existing node, and
-	* the subtree there is empty, just place our leaf there and we're
-	* done.  Obviously this can't happen if SLICE == 1.
-	*/
+	 * If the divergence point is at same nib as an existing node, and
+	 * the subtree there is empty, just place our leaf there and we're
+	 * done.  Obviously this can't happen if SLICE == 1.
+	 */
 	if (!n) {
 		assert(diff < leaf->key().size() && diff < key.size());
 
@@ -246,54 +252,53 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 		return;
 	}
 
-	/* New key is a prefix of the leaf key or they are equal. We need to add leaf ptr to internal node. */
+	/* New key is a prefix of the leaf key or they are equal. We need to add leaf ptr
+	 * to internal node. */
 	if (diff == key.size()) {
-		if ((!n.is_leaf() && n->byte != diff) || (!n.is_leaf() && n->bit != 0) || (n.is_leaf() && n.get_leaf(pool_id)->key().compare(key) != 0)) {
-			/* We have to add new node at the edge from parent to n */
-			tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
-			node->child[slice_index(leaf->key().data()[diff], 0)] = n;
-			node->leaf =  new_leaf;
-			node->byte = diff;
-			node->bit = 0;
-
-			acts.set((uint64_t *)parent, node.offset());
-			acts.set(&size_, size_ + 1);
-			acts.publish();
-
-			return;
-		}
-		
-		if (n.is_leaf() ){
-			/* Update of existing leaf. */
+		if (n.is_leaf() && n.get_leaf(pool_id)->key().size() == key.size()) {
+			/* Update the existing leaf. */
 			acts.free(n.offset());
-			acts.set((uint64_t*) parent, new_leaf.offset());
+			acts.set((uint64_t *)parent, new_leaf.offset());
 			acts.publish();
 
 			return;
 		}
-			assert(!n->leaf || n->leaf.get_leaf(pool_id)->key().compare(key) == 0);
 
+		if (!n.is_leaf() && n->byte == key.size() && n->bit == 4) {
 			/* Update or insert in internal node */
 			if (n->leaf)
 				acts.free(n->leaf.offset());
 			else
 				acts.set(&size_, size_ + 1);
 
-			acts.set((uint64_t*) &n->leaf, new_leaf.offset());
+			acts.set((uint64_t *)&n->leaf, new_leaf.offset());
 			acts.publish();
 
 			return;
-	
+		}
+
+		/* We have to add new node at the edge from parent to n */
+		tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
+		node->child[slice_index(leaf->key().data()[diff], sh)] = n;
+		node->leaf = new_leaf;
+		node->byte = diff;
+		node->bit = sh;
+
+		acts.set((uint64_t *)parent, node.offset());
+		acts.set(&size_, size_ + 1);
+		acts.publish();
+		return;
 	}
 
 	if (diff == leaf->key().size()) {
-		/* Leaf key is a prefix of the new key. We need to convert leaf to a node. */
+		/* Leaf key is a prefix of the new key. We need to convert leaf to a node.
+		 */
 
 		tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
-		node->child[slice_index(key.data()[diff], 0)] = new_leaf;
-		node->leaf =  n;
+		node->child[slice_index(key.data()[diff], sh)] = new_leaf;
+		node->leaf = n;
 		node->byte = diff;
-		node->bit = 0;
+		node->bit = sh;
 
 		acts.set((uint64_t *)parent, node.offset());
 		acts.set(&size_, size_ + 1);
@@ -306,7 +311,7 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 	tagged_node_ptr node = acts.make<tree::node>(sizeof(tree::node));
 
 	node->child[slice_index(leaf->key().data()[diff], sh)] = n;
-	node->child[slice_index(key.data()[diff], sh)] =  new_leaf;
+	node->child[slice_index(key.data()[diff], sh)] = new_leaf;
 	node->byte = diff;
 	node->bit = sh;
 
@@ -317,15 +322,18 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 
 bool tree::get(string_view key, pmemkv_get_v_callback *cb, void *arg)
 {
-	iterate([](const char*, size_t, const char*, size_t, void*){return 0;}, nullptr);
+	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
+		nullptr);
 
 	auto n = root;
+	auto prev = n;
 	auto byte = 0;
 	while (n && !n.is_leaf()) {
+		prev = n;
 		assert(n->byte * 8 + (8 - n->bit) > byte);
 		assert(n->bit == 0 || n->bit == 4);
 		byte = n->byte * 8 + (8 - n->bit) > byte;
-		if (n->byte == key.size() && n->bit == 0)
+		if (n->byte == key.size() && n->bit == 4)
 			n = n->leaf;
 		else if (n->byte > key.size())
 			return false;
@@ -353,7 +361,8 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 	auto *parent = &root;
 	decltype(parent) pp = nullptr;
 
-	iterate([](const char*, size_t, const char*, size_t, void*){return 0;}, nullptr);
+	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
+		nullptr);
 
 	auto byte = 0;
 	while (n && !n.is_leaf()) {
@@ -362,7 +371,7 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 		byte = n->byte * 8 + (8 - n->bit) > byte;
 		pp = parent;
 
-		if (n->byte == key.size() && n->bit == 0)
+		if (n->byte == key.size() && n->bit == 4)
 			parent = &n->leaf;
 		else if (n->byte > key.size())
 			return false;
@@ -387,32 +396,38 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 	/* was root */
 	if (!pp) {
 		acts.publish();
-		iterate([](const char*, size_t, const char*, size_t, void*){return 0;}, nullptr);
+		iterate([](const char *, size_t, const char *, size_t,
+			   void *) { return 0; },
+			nullptr);
 		return true;
 	}
 
-		n = *pp;
-		tagged_node_ptr only_child = nullptr;
-		for (int i = 0; i < (int)SLNODES; i++) {
-			auto &child = n->child[i];
-			if (child && &child != parent) {
-				if (only_child) {
-					/* more than one child */
-					acts.publish();
-					iterate([](const char*, size_t, const char*, size_t, void*){return 0;}, nullptr);
-					return true;
-				}
-				only_child = n->child[i];
+	n = *pp;
+	tagged_node_ptr only_child = nullptr;
+	for (int i = 0; i < (int)SLNODES; i++) {
+		auto &child = n->child[i];
+		if (child && &child != parent) {
+			if (only_child) {
+				/* more than one child */
+				acts.publish();
+				iterate([](const char *, size_t, const char *, size_t,
+					   void *) { return 0; },
+					nullptr);
+				return true;
 			}
+			only_child = n->child[i];
 		}
+	}
 
-		if (only_child && n->leaf && &n->leaf != parent) {
-			/* there are actually 2 "childred" */
-			acts.publish();
-			iterate([](const char*, size_t, const char*, size_t, void*){return 0;}, nullptr);
-			return true;
-		} else if (n->leaf && &n->leaf != parent)
-			only_child = n->leaf;
+	if (only_child && n->leaf && &n->leaf != parent) {
+		/* there are actually 2 "childred" */
+		acts.publish();
+		iterate([](const char *, size_t, const char *, size_t,
+			   void *) { return 0; },
+			nullptr);
+		return true;
+	} else if (n->leaf && &n->leaf != parent)
+		only_child = n->leaf;
 
 	assert(only_child);
 
@@ -421,7 +436,8 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 
 	acts.publish();
 
-	iterate([](const char*, size_t, const char*, size_t, void*){return 0;}, nullptr);
+	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
+		nullptr);
 
 	return true;
 }
@@ -601,8 +617,7 @@ status radix::exists(string_view key)
 	std::shared_lock<lock_type> lock(mtx);
 
 	auto found = tree->get(
-		key, [](const char *v, size_t size, void *arg) {},
-		nullptr);
+		key, [](const char *v, size_t size, void *arg) {}, nullptr);
 
 	return found ? status::OK : status::NOT_FOUND;
 }

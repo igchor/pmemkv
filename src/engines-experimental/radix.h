@@ -133,7 +133,8 @@ private:
 		char *data_rw();
 	};
 
-	int n_child(tagged_node_ptr n) {
+	int n_child(tagged_node_ptr n)
+	{
 		int num = 0;
 		for (int i = 0; i < (int)SLNODES; i++) {
 			auto &child = n->child[i];
@@ -150,7 +151,7 @@ private:
 	uint64_t pool_id = 0;
 
 	leaf *any_leaf(tagged_node_ptr n);
-	leaf* descend(string_view key);
+	leaf *descend(string_view key);
 
 	/*
 	 * internal: slice_index -- return index of child at the given nib
