@@ -103,6 +103,14 @@ private:
 		uint64_t off;
 	};
 
+	/* 
+	 * Internal nodes store SLNODES children ptrs + one leaf ptr.
+	 * The leaf ptr is used only for nodes for which length of the path from
+	 * root is a multiple of byte (n->bit == 8 - SLICE).
+	 *
+	 * This ptr stores pointer to a leaf
+	 * which is a prefix of some other leaf.
+	 */
 	struct node {
 		tagged_node_ptr child[SLNODES];
 		tagged_node_ptr leaf = nullptr; // -> ptr<leaf>
