@@ -29,38 +29,25 @@ namespace radix
 static uint64_t g_pool_id;
 
 tree::leaf::leaf(string_view key, string_view value):
-    ksize(key.size()), value(value.data(), value.size())
+    ksize(key.size()), vsize(value.size())
 {
 	auto *ptr = reinterpret_cast<char *>(this + 1);
-
 	std::memcpy(ptr, key.data(), key.size());
+
+	ptr += key.size();
+	std::memcpy(ptr, value.data(), value.size());
 }
-//: ksize(key.size()), vsize(value.size())
-// {
-// 	std::memcpy(this->data_rw(), key.data(), key.size());
-// 	// XXX - alignment
-// 	std::memcpy(this->data_rw() + key.size(), value.data(), value.size());
-// }
 
 const char *tree::leaf::data() const noexcept
 {
-	return value.c_str();
+	auto *ptr = reinterpret_cast<const char *>(this + 1) + ksize;
+	return ptr;
 }
 
 string_view tree::leaf::key() const noexcept
 {
 	auto *ptr = reinterpret_cast<const char *>(this + 1);
-
 	return string_view(ptr, ksize);
-}
-
-char *tree::leaf::data_rw()
-{
-	return value.data();
-
-	// auto *ptr = reinterpret_cast<char *>(this + 1);
-
-	// return ptr;
 }
 
 tree::tree() : root(nullptr), size_(0)
@@ -347,7 +334,7 @@ bool tree::get(string_view key, pmemkv_get_v_callback *cb, void *arg)
 	if (key.compare(leaf->key()) != 0)
 		return false;
 
-	cb(leaf->data(), leaf->value.size(), arg);
+	cb(leaf->data(), leaf->vsize, arg);
 
 	return true;
 }
@@ -438,7 +425,7 @@ void tree::iterate_rec(tree::tagged_node_ptr n, pmemkv_get_kv_callback *callback
 	} else {
 		auto leaf = n.get_leaf(pool_id);
 		callback(leaf->key().data(), leaf->key().size(), leaf->data(),
-			 leaf->value.size(), arg);
+			 leaf->vsize, arg);
 	}
 }
 

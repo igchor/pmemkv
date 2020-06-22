@@ -131,13 +131,8 @@ private:
 
 		std::size_t capacity();
 
-		// obj::p<uint64_t> vsize;
+		obj::p<uint64_t> vsize;
 		obj::p<uint64_t> ksize;
-
-		pmem::obj::string value;
-
-	private:
-		char *data_rw();
 	};
 
 	int n_child(tagged_node_ptr n)
