@@ -72,14 +72,14 @@ struct actions {
 	actions(obj::pool_base pop, uint64_t pool_id, std::size_t cap = 4)
 	    : pop(pop), pool_id(pool_id), mtx(pop)
 	{
-		// acts.reserve(cap);
+		acts.reserve(cap);
 	}
 
 	void set(uint64_t *what, uint64_t value)
 	{
-		// acts.emplace_back();
-		// pmemobj_set_value(pop.handle(), &acts.back(), what, value);
-		*what = value;
+		acts.emplace_back();
+		pmemobj_set_value(pop.handle(), &acts.back(), what, value);
+		//*what = value;
 	}
 
 	void free(uint64_t off)
@@ -89,22 +89,22 @@ struct actions {
 		if (!off)
 			return;
 
-		pmemobj_tx_free({pool_id, off});
+		// pmemobj_tx_free({pool_id, off});
 
-		// acts.emplace_back();
-		// pmemobj_defer_free(pop.handle(), PMEMoid{pool_id, off}, &acts.back());
+		acts.emplace_back();
+		pmemobj_defer_free(pop.handle(), PMEMoid{pool_id, off}, &acts.back());
 	}
 
 	template <typename T, typename... Args>
 	obj::persistent_ptr<T> make(uint64_t size, Args &&... args)
 	{
-		// acts.emplace_back();
-		// obj::persistent_ptr<T> ptr =
-		// 	pmemobj_reserve(pop.handle(), &acts.back(), size, 0);
+		acts.emplace_back();
+		obj::persistent_ptr<T> ptr =
+			pmemobj_reserve(pop.handle(), &acts.back(), size, 0);
 
 		// new (ptr.get()) T(std::forward<Args>(args)...);
 
-		auto ptr = pmem::obj::persistent_ptr<T>(pmemobj_tx_alloc(size, 0));
+		// auto ptr = pmem::obj::persistent_ptr<T>(pmemobj_tx_alloc(size, 0));
 
 		new (ptr.get()) T(std::forward<Args>(args)...);
 
@@ -118,10 +118,10 @@ struct actions {
 		//  */
 		// std::atomic_thread_fence(std::memory_order_release);
 
-		// if (pmemobj_publish(pop.handle(), acts.data(), acts.size()))
-		// 	throw std::runtime_error("XXX");
+		if (pmemobj_publish(pop.handle(), acts.data(), acts.size()))
+		 	throw std::runtime_error("XXX");
 
-		pmem::obj::transaction::commit();
+		// pmem::obj::transaction::commit();
 	}
 
 private:
