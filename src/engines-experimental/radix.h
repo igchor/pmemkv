@@ -103,7 +103,7 @@ private:
 		uint64_t off;
 	};
 
-	/* 
+	/*
 	 * Internal nodes store SLNODES children ptrs + one leaf ptr.
 	 * The leaf ptr is used only for nodes for which length of the path from
 	 * root is a multiple of byte (n->bit == 8 - SLICE).
@@ -132,9 +132,8 @@ private:
 		std::size_t capacity();
 
 		// obj::p<uint64_t> vsize;
-		// obj::p<uint64_t> ksize;
+		obj::p<uint64_t> ksize;
 
-		pmem::obj::string key_;
 		pmem::obj::string value;
 
 	private:

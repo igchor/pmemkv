@@ -28,9 +28,12 @@ namespace radix
 
 static uint64_t g_pool_id;
 
-tree::leaf::leaf(string_view key, string_view value)
-    : key_(key.data(), key.size()), value(value.data(), value.size())
+tree::leaf::leaf(string_view key, string_view value):
+    ksize(key.size()), value(value.data(), value.size())
 {
+	auto *ptr = reinterpret_cast<char *>(this + 1);
+
+	std::memcpy(ptr, key.data(), key.size());
 }
 //: ksize(key.size()), vsize(value.size())
 // {
@@ -46,7 +49,9 @@ const char *tree::leaf::data() const noexcept
 
 string_view tree::leaf::key() const noexcept
 {
-	return string_view(key_.c_str(), key_.size());
+	auto *ptr = reinterpret_cast<const char *>(this + 1);
+
+	return string_view(ptr, ksize);
 }
 
 char *tree::leaf::data_rw()
@@ -193,9 +198,6 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 {
 	actions acts(pop, pool_id);
 
-	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
-		nullptr);
-
 	tagged_node_ptr new_leaf = acts.make<tree::leaf>(
 		sizeof(tree::leaf) + value.size() + key.size(), key, value);
 
@@ -220,18 +222,18 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 	auto parent = &root;
 	auto prev = n;
 
-	bitn_t sh = 4; // XXX 4 to some constant
+	auto min_key_len = std::min(leaf->key().size(), key.size());
+
+	bitn_t sh = 8 - SLICE; // XXX 4 to some constant
 	if (diff < leaf->key().size() && diff < key.size()) {
 		unsigned char at = leaf->key().data()[diff] ^ key.data()[diff];
 		sh = utils::mssb_index((uint32_t)at) & (bitn_t) ~(SLICE - 1);
 	}
 
-	auto byte = 0;
 	while (n && !n.is_leaf() &&
-	       (n->byte < diff || (n->byte == diff && n->bit >= sh))) {
-		assert(n->byte * 8 + (8 - n->bit) > byte);
-		assert(n->bit == 0 || n->bit == 4);
-		byte = n->byte * 8 + (8 - n->bit) > byte;
+	       (n->byte < diff ||
+		(n->byte == diff &&
+		 (n->bit > sh || n->bit == sh && diff < min_key_len)))) {
 
 		prev = n;
 		parent = &n->child[slice_index(key.data()[n->byte], n->bit)];
@@ -322,9 +324,6 @@ void tree::insert(obj::pool_base &pop, string_view key, string_view value)
 
 bool tree::get(string_view key, pmemkv_get_v_callback *cb, void *arg)
 {
-	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
-		nullptr);
-
 	auto n = root;
 	auto prev = n;
 	auto byte = 0;
@@ -361,9 +360,6 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 	auto *parent = &root;
 	decltype(parent) pp = nullptr;
 
-	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
-		nullptr);
-
 	auto byte = 0;
 	while (n && !n.is_leaf()) {
 		assert(n->byte * 8 + (8 - n->bit) > byte);
@@ -396,9 +392,6 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 	/* was root */
 	if (!pp) {
 		acts.publish();
-		iterate([](const char *, size_t, const char *, size_t,
-			   void *) { return 0; },
-			nullptr);
 		return true;
 	}
 
@@ -410,9 +403,6 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 			if (only_child) {
 				/* more than one child */
 				acts.publish();
-				iterate([](const char *, size_t, const char *, size_t,
-					   void *) { return 0; },
-					nullptr);
 				return true;
 			}
 			only_child = n->child[i];
@@ -422,9 +412,6 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 	if (only_child && n->leaf && &n->leaf != parent) {
 		/* there are actually 2 "childred" */
 		acts.publish();
-		iterate([](const char *, size_t, const char *, size_t,
-			   void *) { return 0; },
-			nullptr);
 		return true;
 	} else if (n->leaf && &n->leaf != parent)
 		only_child = n->leaf;
@@ -435,9 +422,6 @@ bool tree::remove(obj::pool_base &pop, string_view key)
 	acts.free(n.offset());
 
 	acts.publish();
-
-	iterate([](const char *, size_t, const char *, size_t, void *) { return 0; },
-		nullptr);
 
 	return true;
 }

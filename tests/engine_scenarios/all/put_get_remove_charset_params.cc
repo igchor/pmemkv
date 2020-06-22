@@ -92,6 +92,74 @@ static void BinaryKeyTest(pmem::kv::db &kv)
 	UT_ASSERTeq(kv.remove(PREFIX), status::OK);
 }
 
+static std::string repeat(std::string str, size_t n)
+{
+	std::string init = "";
+	for (size_t i = 0; i < n; i++)
+		init += str;
+
+	return init;
+}
+
+static void BinaryKeyTestDesc(size_t n_iter, pmem::kv::db &kv)
+{
+	/**
+	 * TEST: each char from the char range is used in two keys
+	 * once with prefix and suffix, once just as is ("clean key")
+	 */
+	size_t cnt = std::numeric_limits<size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK && cnt == 0);
+
+	const std::string init = repeat(PREFIX, n_iter);
+
+	UT_ASSERTeq(kv.exists(init), status::NOT_FOUND);
+	UT_ASSERTeq(kv.put(init, "should_not_change"), status::OK);
+	UT_ASSERTeq(kv.exists(init), status::OK);
+	UT_ASSERT(kv.count_all(cnt) == status::OK && cnt == 1);
+
+	/* Add binary keys */
+	for (size_t i = 0; i < n_iter; i++) {
+		/* key with prefix and suffix */
+		std::string key1 = repeat(PREFIX, i);
+		UT_ASSERTeq(kv.exists(key1), status::NOT_FOUND);
+		UT_ASSERTeq(kv.put(key1, std::to_string(i)), status::OK);
+
+		/* "clean" key */
+		std::string key2 = std::string(i + 1, 'x');
+		UT_ASSERTeq(kv.exists(key2), status::NOT_FOUND);
+		UT_ASSERTeq(kv.put(key2, std::to_string(i)), status::OK);
+	}
+
+	std::string value;
+	UT_ASSERT(kv.count_all(cnt) == status::OK && cnt == (n_iter * 2 + 1));
+	UT_ASSERT(kv.get(init, &value) == status::OK && value == "should_not_change");
+
+	/* Read and remove binary keys */
+	for (size_t i = 0; i < n_iter; i++) {
+		/* key with prefix and suffix */
+		std::string key1 = repeat(PREFIX, i);
+		UT_ASSERTeq(kv.exists(key1), status::OK);
+		UT_ASSERT(kv.get(key1, &value) == status::OK &&
+			  value == std::to_string(i));
+
+		UT_ASSERTeq(kv.remove(key1), status::OK);
+		UT_ASSERTeq(kv.exists(key1), status::NOT_FOUND);
+
+		/* "clean" key */
+		std::string key2 = std::string(i + 1, 'x');
+		UT_ASSERTeq(kv.exists(key2), status::OK);
+		UT_ASSERT(kv.get(key2, &value) == status::OK &&
+			  value == std::to_string(i));
+
+		UT_ASSERTeq(kv.remove(key2), status::OK);
+		UT_ASSERTeq(kv.exists(key2), status::NOT_FOUND);
+	}
+
+	UT_ASSERT(kv.count_all(cnt) == status::OK && cnt == 1);
+	UT_ASSERT(kv.get(init, &value) == status::OK && value == "should_not_change");
+	UT_ASSERTeq(kv.remove(init), status::OK);
+}
+
 static void BinaryRandKeyTest(const size_t elements_cnt, const size_t max_key_len,
 			      pmem::kv::db &kv)
 {
@@ -234,6 +302,7 @@ static void test(int argc, char *argv[])
 		argv[1], argv[2],
 		{
 			BinaryKeyTest,
+			std::bind(BinaryKeyTestDesc, elements_cnt, _1),
 			std::bind(BinaryRandKeyTest, elements_cnt, max_str_len, _1),
 			BinaryValueTest,
 			std::bind(BinaryRandValueTest, elements_cnt, max_str_len, _1),

@@ -1258,15 +1258,8 @@ if(ENGINE_RADIX)
 
 	add_engine_test(ENGINE radix
 			BINARY put_get_remove
-			TRACERS none memcheck #pmemcheck
+			TRACERS none memcheck pmemcheck
 			SCRIPT pmemobj_based/default.cmake)
-
-	# Expects no limit for key length
-	# add_engine_test(ENGINE radix
-	# BINARY put_get_remove_params
-	# TRACERS none #memcheck
-	# SCRIPT pmemobj_based/default.cmake
-	# DB_SIZE 4G PARAMS 400000)
 
 	add_engine_test(ENGINE radix
 			BINARY put_get_std_map
@@ -1390,7 +1383,20 @@ if(ENGINE_RADIX)
 			BINARY put_get_remove_charset_params
 			TRACERS none memcheck pmemcheck
 			SCRIPT pmemobj_based/default.cmake
-			PARAMS 16 8)
+			PARAMS 1000 16)
+
+	add_engine_test(ENGINE radix
+			BINARY put_get_remove_charset_params
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 1000 1024)
+
+	# XXXX ?
+	# add_engine_test(ENGINE radix
+	# BINARY put_get_remove_charset_params
+	# TRACERS none memcheck pmemcheck
+	# SCRIPT pmemobj_based/default.cmake
+	# PARAMS 1000 16)
 
 	add_engine_test(ENGINE radix
 			BINARY put_get_remove_long_key
