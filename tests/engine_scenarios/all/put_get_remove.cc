@@ -32,31 +32,30 @@ static void SimpleTest(pmem::kv::db &kv)
 
 static void EmptyKeyTest(pmem::kv::db &kv)
 {
-	// XXX
-	// std::size_t cnt = std::numeric_limits<std::size_t>::max();
-	// UT_ASSERT(kv.count_all(cnt) == status::OK);
-	// UT_ASSERT(cnt == 0);
-	// UT_ASSERT(kv.put("", "empty") == status::OK);
-	// cnt = std::numeric_limits<std::size_t>::max();
-	// UT_ASSERT(kv.count_all(cnt) == status::OK);
-	// UT_ASSERT(cnt == 1);
-	// UT_ASSERT(kv.put(" ", "1-space") == status::OK);
-	// cnt = std::numeric_limits<std::size_t>::max();
-	// UT_ASSERT(kv.count_all(cnt) == status::OK);
-	// UT_ASSERTeq(cnt, 2);
-	// UT_ASSERT(kv.put("\t\t", "two-tab") == status::OK);
-	// cnt = std::numeric_limits<std::size_t>::max();
-	// UT_ASSERT(kv.count_all(cnt) == status::OK);
-	// UT_ASSERT(cnt == 3);
-	// std::string value1;
-	// std::string value2;
-	// std::string value3;
-	// UT_ASSERT(status::OK == kv.exists(""));
-	// UT_ASSERT(kv.get("", &value1) == status::OK && value1 == "empty");
-	// UT_ASSERT(status::OK == kv.exists(" "));
-	// UT_ASSERT(kv.get(" ", &value2) == status::OK && value2 == "1-space");
-	// UT_ASSERT(status::OK == kv.exists("\t\t"));
-	// UT_ASSERT(kv.get("\t\t", &value3) == status::OK && value3 == "two-tab");
+	std::size_t cnt = std::numeric_limits<std::size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERT(cnt == 0);
+	UT_ASSERT(kv.put("", "empty") == status::OK);
+	cnt = std::numeric_limits<std::size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERT(cnt == 1);
+	UT_ASSERT(kv.put(" ", "1-space") == status::OK);
+	cnt = std::numeric_limits<std::size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERTeq(cnt, 2);
+	UT_ASSERT(kv.put("\t\t", "two-tab") == status::OK);
+	cnt = std::numeric_limits<std::size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERT(cnt == 3);
+	std::string value1;
+	std::string value2;
+	std::string value3;
+	UT_ASSERT(status::OK == kv.exists(""));
+	UT_ASSERT(kv.get("", &value1) == status::OK && value1 == "empty");
+	UT_ASSERT(status::OK == kv.exists(" "));
+	UT_ASSERT(kv.get(" ", &value2) == status::OK && value2 == "1-space");
+	UT_ASSERT(status::OK == kv.exists("\t\t"));
+	UT_ASSERT(kv.get("\t\t", &value3) == status::OK && value3 == "two-tab");
 }
 
 static void EmptyValueTest(pmem::kv::db &kv)
@@ -87,6 +86,10 @@ static void EmptyValueTest(pmem::kv::db &kv)
 
 static void GetClearExternalValueTest(pmem::kv::db &kv)
 {
+	std::size_t cnt = std::numeric_limits<std::size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERTeq(cnt, 0);
+
 	UT_ASSERT(kv.put("key1", "cool") == status::OK);
 	std::string value = "super";
 	UT_ASSERT(kv.get("key1", &value) == status::OK && value == "cool");
@@ -97,6 +100,10 @@ static void GetClearExternalValueTest(pmem::kv::db &kv)
 
 static void GetHeadlessTest(pmem::kv::db &kv)
 {
+	std::size_t cnt = std::numeric_limits<std::size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERTeq(cnt, 0);
+
 	UT_ASSERT(status::NOT_FOUND == kv.exists("waldo"));
 	std::string value;
 	UT_ASSERT(kv.get("waldo", &value) == status::NOT_FOUND);
@@ -104,12 +111,16 @@ static void GetHeadlessTest(pmem::kv::db &kv)
 
 static void GetMultipleTest(pmem::kv::db &kv)
 {
+	std::size_t cnt = std::numeric_limits<std::size_t>::max();
+	UT_ASSERT(kv.count_all(cnt) == status::OK);
+	UT_ASSERTeq(cnt, 0);
+
 	UT_ASSERT(kv.put("abc", "A1") == status::OK);
 	UT_ASSERT(kv.put("def", "B2") == status::OK);
 	UT_ASSERT(kv.put("hij", "C3") == status::OK);
 	UT_ASSERT(kv.put("jkl", "D4") == status::OK);
 	UT_ASSERT(kv.put("mno", "E5") == status::OK);
-	std::size_t cnt = std::numeric_limits<std::size_t>::max();
+	cnt = std::numeric_limits<std::size_t>::max();
 	UT_ASSERT(kv.count_all(cnt) == status::OK);
 	UT_ASSERTeq(cnt, 5);
 	UT_ASSERT(status::OK == kv.exists("abc"));

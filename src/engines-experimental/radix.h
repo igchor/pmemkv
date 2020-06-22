@@ -76,7 +76,6 @@ private:
 		tagged_node_ptr(tagged_node_ptr &&rhs) = default;
 		tagged_node_ptr(std::nullptr_t);
 
-		tagged_node_ptr(uint64_t off);
 		tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr);
 		tagged_node_ptr(const obj::persistent_ptr<node> &ptr);
 
@@ -94,8 +93,6 @@ private:
 		tree::node *get_node(uint64_t) const;
 
 		tree::node *operator->() const noexcept;
-
-		uint64_t offset() const;
 
 		explicit operator bool() const noexcept;
 
@@ -154,11 +151,30 @@ private:
 	}
 
 	tagged_node_ptr root;
-	uint64_t size_;
+	obj::p<uint64_t> size_;
 	uint64_t pool_id = 0;
+
+	template <typename... Args>
+	tagged_node_ptr make_leaf(string_view key, Args &&... args)
+	{
+		assert(pmemobj_tx_stage() == TX_STAGE_WORK);
+
+		auto ptr = pmem::obj::persistent_ptr<tree::leaf>(
+			pmemobj_tx_alloc(sizeof(tree::leaf) + key.size(), 0));
+		new (ptr.get()) tree::leaf(key, std::forward<Args>(args)...);
+
+		size_++;
+
+		return ptr;
+	}
 
 	leaf *any_leaf(tagged_node_ptr n);
 	leaf *descend(string_view key);
+
+	bool keys_equal(string_view k1, string_view k2)
+	{
+		return k1.size() == k2.size() && k1.compare(k2) == 0;
+	}
 
 	/*
 	 * internal: slice_index -- return index of child at the given nib
