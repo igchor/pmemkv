@@ -396,39 +396,91 @@ tree::tagged_node_ptr::tagged_node_ptr(std::nullptr_t)
 	this->off = 0;
 }
 
+tree::tagged_node_ptr::tagged_node_ptr()
+{
+	this->off = 0;
+}
+
+tree::tagged_node_ptr::tagged_node_ptr(const tagged_node_ptr &rhs)
+{
+	if (!rhs) {
+		this->off = 0;
+	} else {
+		this->off = rhs.get<uint64_t>() - reinterpret_cast<uint64_t>(this);
+		off |= unsigned(rhs.is_leaf());
+	}
+}
+
+tree::tagged_node_ptr &tree::tagged_node_ptr::operator=(const tagged_node_ptr &rhs)
+{
+	if (!rhs) {
+		this->off = 0;
+	} else {
+		this->off = rhs.get<uint64_t>() - reinterpret_cast<uint64_t>(this);
+		off |= unsigned(rhs.is_leaf());
+	}
+
+	return *this;
+}
+
 tree::tagged_node_ptr::tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr)
 {
-	off = (ptr.raw().off | 1);
+	if (!ptr) {
+		this->off = 0;
+	} else {
+		off = reinterpret_cast<uint64_t>(ptr.get()) -
+			reinterpret_cast<uint64_t>(this);
+		off |= 1;
+	}
 }
 
 tree::tagged_node_ptr::tagged_node_ptr(const obj::persistent_ptr<node> &ptr)
 {
-	off = ptr.raw().off;
+	if (!ptr) {
+		this->off = 0;
+	} else {
+		off = reinterpret_cast<uint64_t>(ptr.get()) -
+			reinterpret_cast<uint64_t>(this);
+	}
 }
 
 tree::tagged_node_ptr &tree::tagged_node_ptr::operator=(std::nullptr_t)
 {
-	off = 0;
+	this->off = 0;
+
 	return *this;
 }
 
 tree::tagged_node_ptr &
 tree::tagged_node_ptr::operator=(const obj::persistent_ptr<leaf> &rhs)
 {
-	off = (rhs.raw().off | 1);
+	if (!rhs) {
+		this->off = 0;
+	} else {
+		off = reinterpret_cast<uint64_t>(rhs.get()) -
+			reinterpret_cast<uint64_t>(this);
+		off |= 1;
+	}
+
 	return *this;
 }
 
 tree::tagged_node_ptr &
 tree::tagged_node_ptr::operator=(const obj::persistent_ptr<node> &rhs)
 {
-	off = rhs.raw().off;
+	if (!rhs) {
+		this->off = 0;
+	} else {
+		off = reinterpret_cast<uint64_t>(rhs.get()) -
+			reinterpret_cast<uint64_t>(this);
+	}
+
 	return *this;
 }
 
 bool tree::tagged_node_ptr::operator==(const tree::tagged_node_ptr &rhs) const
 {
-	return off == rhs.off;
+	return get<uint64_t>() == rhs.get<uint64_t>() || (!*this && !rhs);
 }
 
 bool tree::tagged_node_ptr::operator!=(const tree::tagged_node_ptr &rhs) const
@@ -444,23 +496,23 @@ bool tree::tagged_node_ptr::is_leaf() const
 tree::leaf *tree::tagged_node_ptr::get_leaf(uint64_t pool_id) const
 {
 	assert(is_leaf());
-	return (tree::leaf *)pmemobj_direct({pool_id, off & ~1ULL});
+	return get<tree::leaf *>();
 }
 
-tree::node *tree::tagged_node_ptr::get_node(uint64_t pool_id) const
+tree::node *tree::tagged_node_ptr::get_node(uint64_t pool_id = 0) const
 {
 	assert(!is_leaf());
-	return (tree::node *)pmemobj_direct({pool_id, off});
+	return get<tree::node *>();
 }
 
 tree::tagged_node_ptr::operator bool() const noexcept
 {
-	return off != 0;
+	return (off & ~uint64_t(1)) != 0;
 }
 
 tree::node *tree::tagged_node_ptr::operator->() const noexcept
 {
-	return get_node(g_pool_id);
+	return get_node();
 }
 
 } // namespace radix

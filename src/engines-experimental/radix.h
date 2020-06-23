@@ -71,15 +71,14 @@ private:
 	struct node;
 
 	struct tagged_node_ptr {
-		tagged_node_ptr() = default;
-		tagged_node_ptr(const tagged_node_ptr &rhs) = default;
-		tagged_node_ptr(tagged_node_ptr &&rhs) = default;
+		tagged_node_ptr();
+		tagged_node_ptr(const tagged_node_ptr &rhs);
 		tagged_node_ptr(std::nullptr_t);
 
 		tagged_node_ptr(const obj::persistent_ptr<leaf> &ptr);
 		tagged_node_ptr(const obj::persistent_ptr<node> &ptr);
 
-		tagged_node_ptr &operator=(const tagged_node_ptr &rhs) = default;
+		tagged_node_ptr &operator=(const tagged_node_ptr &rhs);
 		tagged_node_ptr &operator=(std::nullptr_t);
 		tagged_node_ptr &operator=(const obj::persistent_ptr<leaf> &rhs);
 		tagged_node_ptr &operator=(const obj::persistent_ptr<node> &rhs);
@@ -97,7 +96,14 @@ private:
 		explicit operator bool() const noexcept;
 
 	private:
-		uint64_t off;
+		template <typename T>
+		T get() const noexcept
+		{
+			return reinterpret_cast<T>(reinterpret_cast<uint64_t>(this) +
+						   (off & ~uint64_t(1)));
+		}
+
+		obj::p<uint64_t> off;
 	};
 
 	/*
