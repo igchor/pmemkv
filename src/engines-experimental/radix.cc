@@ -255,14 +255,11 @@ status radix::put(string_view key, string_view value)
 
 
 
-	auto result = container->emplace(key, value);
+	auto result = container->emplace(pmpool, key, value);
 
 	if (result.second == false) {
 		auto &it = result.first;
-		
-		pmem::obj::transaction::run(pmpool, [&] {
-			it.assign(value);
-		});
+		it.assign(value, pmpool);
 	}
 
 	return status::OK;
