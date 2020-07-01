@@ -290,6 +290,8 @@ void radix::Recover()
 			pmemobj_direct(*root_oid));
 
 		container = &pmem_ptr->map;
+
+		g_pool_id = pmemobj_oid(root_oid).pool_uuid_lo;
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
