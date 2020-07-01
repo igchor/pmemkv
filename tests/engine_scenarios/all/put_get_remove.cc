@@ -43,6 +43,7 @@ static void EmptyKeyTest(pmem::kv::db &kv)
 	cnt = std::numeric_limits<std::size_t>::max();
 	UT_ASSERT(kv.count_all(cnt) == status::OK);
 	UT_ASSERT(cnt == 2);
+	UT_ASSERT(status::OK == kv.exists(""));
 	UT_ASSERT(kv.put("\t\t", "two-tab") == status::OK);
 	cnt = std::numeric_limits<std::size_t>::max();
 	UT_ASSERT(kv.count_all(cnt) == status::OK);
@@ -50,6 +51,7 @@ static void EmptyKeyTest(pmem::kv::db &kv)
 	std::string value1;
 	std::string value2;
 	std::string value3;
+
 	UT_ASSERT(status::OK == kv.exists(""));
 	UT_ASSERT(kv.get("", &value1) == status::OK && value1 == "empty");
 	UT_ASSERT(status::OK == kv.exists(" "));
