@@ -8,7 +8,7 @@ secondary_title: pmemkv
 ...
 
 [comment]: <> (SPDX-License-Identifier: BSD-3-Clause)
-[comment]: <> (Copyright 2019, Intel Corporation)
+[comment]: <> (Copyright 2019-2020, Intel Corporation)
 
 [comment]: <> (libpmemkv.7 -- man page for libpmemkv)
 
@@ -33,12 +33,9 @@ It has multiple storage engines, each optimized for a different use case. They d
 
 + concurrency - engines provide a varying degree of write scalability in multi-threaded workloads. Concurrent engines support non-blocking retrievals and, on average, highly scalable updates. For details see the description of individual engines.
 
-+ keys' ordering - "sorted" engines support querying above/below the given key
++ keys' ordering - "sorted" engines support querying above/below the given key. Most sorted engines also support passing a custom comparator object (see **libpmemkv_config**(3)). By default, pmemkv stores elements in binary order (comparison is done using a function equivalent to std::string::compare).
 
 Persistent engines usually use libpmemobj++ and PMDK to access NVDIMMs. They can work with files on DAX filesystem (fsdax) or DAX device.
-
-For description of pmemkv core API see **libpmemkv**(3).
-For description of pmemkv configuration API see **libpmemkv_config**(3).
 
 # ENGINES #
 
@@ -52,6 +49,10 @@ For description of pmemkv configuration API see **libpmemkv_config**(3).
 The most mature and recommended engine to use for persistent use-cases is **cmap**. It provides good performance results and stability.
 
 Each engine can be manually turned on and off at build time, using CMake options. All engines listed here are enabled and ready to use.
+
+To configure an engine, pmemkv_config is used (**libpmemkv_config**(3)). Below is a list of engines along with config parameters they expect. Each paramter has a certain type and should be inerted to a config using appropriate function. For example, to insert a parameter of type `string`, `pmemkv_config_put_string` function should be used.
+
+For description of pmemkv core API see **libpmemkv**(3).
 
 ## cmap
 
@@ -83,7 +84,7 @@ The following table shows three possible combinations of parameters (where '-' m
 | **3** | - | - | - | set |
 
 A database file or a poolset file can also be created using **pmempool** utility (see **pmempool-create**(1)).
-When using **pmempool create**, "pmemkv" should be passed as layout. Only PMEMOBJ pools are supported.
+When using **pmempool create**, "pmemkv" should be passed as layout for cmap engine and "pmemkv_\<engine-name\>" for other engines (e.g. "pmemkv_stree" for stree engine). Only PMEMOBJ pools are supported.
 
 ## vcmap
 
@@ -114,6 +115,8 @@ This engine requires the following config parameters (see **libpmemkv_config**(3
 * **size** --  Specifies size of the database [in bytes]
 	+ type: uint64_t
 	+ min value: 8388608 (8MB)
+* **comparator** -- (optional) Specified comparator used by the engine
+	+ type: object
 
 ## blackhole
 
@@ -125,8 +128,8 @@ No supported configuration parameters.
 
 ### Experimental engines
 
-There are also more engines in various states of development, for details see <https://github.com/pmem/pmemkv>.
-Two of them (tree3 and stree) requires the config parameters like cmap and similarly to cmap should not be used within libpmemobj transaction(s).
+There are also more engines in various states of development, for details see <https://github.com/pmem/pmemkv/blob/master/ENGINES-experimental.md>.
+Some of them (radix, tree3, stree and csmap) requires the config parameters like cmap and similarly to cmap should not be used within libpmemobj transaction(s).
 
 # BINDINGS #
 
@@ -135,8 +138,6 @@ Bindings for other languages are available on GitHub. Currently they support onl
 Existing bindings:
 
 + Java - for details see <https://github.com/pmem/pmemkv-java>
-
-+ JNI - for details see <https://github.com/pmem/pmemkv-jni>
 
 + Node.js - for details see <https://github.com/pmem/pmemkv-nodejs>
 
