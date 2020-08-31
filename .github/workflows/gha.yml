@@ -25,16 +25,7 @@ jobs:
         WORKDIR:        utils/docker
       strategy:
         matrix:
-          CONFIG: ["TYPE=debug OS=fedora OS_VER=31",
-                   "TYPE=debug OS=ubuntu OS_VER=19.10 XXX_DISABLE_COVERAGE=1",
-                   "TYPE=release OS=fedora OS_VER=31",
-                   "TYPE=release OS=ubuntu OS_VER=19.10",
-                   "TYPE=valgrind OS=ubuntu OS_VER=19.10",
-                   "TYPE=memcheck_drd OS=ubuntu OS_VER=19.10",
-                   "TYPE=building OS=fedora OS_VER=31 PUSH_IMAGE=1",
-                   "TYPE=building OS=ubuntu OS_VER=19.10 PUSH_IMAGE=1 XXX_DISABLE_COVERAGE=1",
-                   "TYPE=compatibility OS=fedora OS_VER=31",
-                   "TYPE=bindings OS=ubuntu OS_VER=19.10_bindings PUSH_IMAGE=1"]
+          CONFIG: ["TYPE=debug OS=fedora OS_VER=31"]
       steps:
         - name: Clone the git repo
           uses: actions/checkout@v2
