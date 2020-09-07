@@ -95,6 +95,16 @@ int pmemkv_defrag(pmemkv_db *db, double start_percent, double amount_percent);
 
 const char *pmemkv_errormsg(void);
 
+/* EXPERIMENTAL API */
+typedef struct pmemkv_iterator pmemkv_iterator;
+
+pmemkv_iterator *pmemkv_iterator_new(pmemkv_db *db);
+void pmemkv_iterator_destroy(pmemkv_iterator *it);
+int pmemkv_iterator_next(pmemkv_iterator *it);
+int pmemkv_iterator_prev(pmemkv_iterator *it);
+int pmemkv_iterator_get(pmemkv_iterator *it, const char **key, size_t *kb,
+			const char **value, size_t *vb);
+
 #ifdef __cplusplus
 } /* end extern "C" */
 #endif

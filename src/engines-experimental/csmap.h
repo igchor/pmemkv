@@ -121,6 +121,61 @@ private:
 	using unique_node_lock_type = std::unique_lock<node_mutex_type>;
 	using container_type = internal::csmap::map_type;
 
+	class iterator : public internal::iterator_base {
+	public:
+		iterator(csmap *engine)
+		    : internal::iterator_base(engine), lock(engine->mtx)
+		{
+		}
+
+		status seek_to_begin() final
+		{
+			auto map = static_cast<csmap *>(engine);
+			it = map->container->begin();
+
+			element_lock = csmap::shared_node_lock_type(it->second.mtx);
+
+			return status::OK;
+		}
+		status seek_to_end() final
+		{
+			auto map = static_cast<csmap *>(engine);
+			it = map->container->end();
+
+			element_lock = csmap::shared_node_lock_type(it->second.mtx);
+
+			return status::OK;
+		}
+
+		status next() final
+		{
+			++it;
+
+			element_lock = csmap::shared_node_lock_type(it->second.mtx);
+
+			return status::OK;
+		}
+
+		string_view key() final
+		{
+			// XXX - lock could be taken here (if not already taken) and held until iterator is moved
+
+			return string_view(it->first.data(), it->first.size());
+		}
+
+		string_view value() final
+		{
+			// XXX - lock could be taken here (if not already taken) and held until iterator is moved
+
+			return string_view(it->second.val.data(), it->second.val.size());
+		}
+
+	private:
+		csmap::shared_global_lock_type lock;
+		csmap::shared_node_lock_type element_lock;
+		typename internal::csmap::map_type::iterator it;
+	};
+
 	void Recover();
 	status iterate(typename container_type::iterator first,
 		       typename container_type::iterator last, get_kv_callback *callback,

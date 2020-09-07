@@ -9,6 +9,7 @@
 #include <string>
 
 #include "config.h"
+#include "iterator.h"
 #include "libpmemkv.hpp"
 
 namespace pmem
@@ -51,6 +52,11 @@ public:
 	virtual status put(string_view key, string_view value) = 0;
 	virtual status remove(string_view key) = 0;
 	virtual status defrag(double start_percent, double amount_percent);
+
+	virtual internal::iterator_base new_iterator()
+	{
+		return internal::iterator_base{this};
+	}
 
 private:
 	static void check_config_null(const std::string &engine_name,

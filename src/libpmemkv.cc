@@ -534,4 +534,28 @@ const char *pmemkv_errormsg(void)
 	return out_get_errormsg();
 }
 
+// pmemkv_iterator* pmemkv_iterator_new(pmemkv_db *db, pmemkv_config*)
+// {
+// 	return new pmemkv_iterator{db};
+// }
+
+// void pmemkv_iterator_destroy(pmemkv_iterator* it)
+// {
+// 	delete it;
+// }
+
+// int pmemkv_iterator_seek_to_begin(pmemkv_iterator *it)
+// {
+// 	return db_to_internal(it->db)->seek_to_begin(&it->internal_iterator);
+// }
+
+// int pmemkv_iterator_next(pmemkv_iterator *it)
+// {
+// 	return db_to_internal(it->db)->seek_to_begin(&it->internal_iterator);
+// }
+
+// int pmemkv_iterator_prev(pmemkv_iterator *it);
+// int pmemkv_iterator_get(pmemkv_iterator *it, const char** key, size_t *kb, const char
+// **value, size_t *vb);
+
 } /* extern "C" */
