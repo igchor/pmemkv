@@ -181,6 +181,9 @@ build_test_ext(NAME comparator_default_reopen_c SRC_FILES comparator/default_reo
 build_test_ext(NAME comparator_custom_reopen_cpp SRC_FILES comparator/custom_reopen.cc LIBS json)
 build_test_ext(NAME comparator_default_reopen_cpp SRC_FILES comparator/default_reopen.cc LIBS json)
 
+# Tests for transaction
+build_test_ext(NAME transaction_basic SRC_FILES engine_scenarios/transaction/basic.cc LIBS json)
+
 ###################################### CMAP ####################################
 if(ENGINE_CMAP)
 	add_engine_test(ENGINE cmap
@@ -671,6 +674,11 @@ if(ENGINE_CSMAP)
 			TRACERS none memcheck pmemcheck
 			SCRIPT pmemobj_based/pmemobj/put_get_std_map_force_create.cmake
 			PARAMS 1000 100 200)
+
+	add_engine_test(ENGINE csmap
+			BINARY transaction_basic
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake)
 endif(ENGINE_CSMAP)
 ################################################################################
 ###################################### VCMAP ###################################

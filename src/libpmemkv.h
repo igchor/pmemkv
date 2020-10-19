@@ -30,6 +30,7 @@ extern "C" {
 typedef struct pmemkv_db pmemkv_db;
 typedef struct pmemkv_config pmemkv_config;
 typedef struct pmemkv_comparator pmemkv_comparator;
+typedef struct pmemkv_tx pmemkv_tx;
 
 typedef int pmemkv_get_kv_callback(const char *key, size_t keybytes, const char *value,
 				   size_t valuebytes, void *arg);
@@ -65,6 +66,11 @@ int pmemkv_config_put_path(pmemkv_config *config, const char *value);
 int pmemkv_config_put_force_create(pmemkv_config *config, bool value);
 int pmemkv_config_put_comparator(pmemkv_config *config, pmemkv_comparator *comparator);
 int pmemkv_config_put_oid(pmemkv_config *config, PMEMoid *oid);
+
+pmemkv_tx *pmemkv_tx_begin(pmemkv_db *db);
+int pmemkv_tx_put(pmemkv_tx *tx, const char *k, size_t kb, const char *v, size_t vb);
+int pmemkv_tx_commit(pmemkv_tx *tx);
+void pmemkv_tx_abort(pmemkv_tx *tx);
 
 int pmemkv_open(const char *engine, pmemkv_config *config, pmemkv_db **db);
 void pmemkv_close(pmemkv_db *kv);

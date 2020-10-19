@@ -8,6 +8,85 @@ namespace pmem
 {
 namespace kv
 {
+namespace internal
+{
+namespace csmap
+{
+
+transaction::transaction(global_mutex_type &mtx, pmem::obj::pool_base &pop,
+			 typename redo_log_set_type::accessor &&acc, map_type *container)
+    : mtx(mtx),
+      pop(pop),
+      tx(new pmem::obj::transaction::manual(pop)),
+      acc(std::move(acc)),
+      container(container)
+{
+}
+
+status transaction::put(string_view key, string_view value)
+{
+	assert(pmemobj_tx_stage == TX_STAGE_WORK);
+
+	acc.get().emplace_back(key, value);
+	return status::OK;
+
+	// XXX - optimization for blind update : check if element exists, and if so
+	// just build action log for std::move(value) in csmap
+
+	// XXX - global lock would have to be held from start of tx until commit ends
+	// but we could use timed lock
+
+}
+
+status transaction::commit()
+{
+	pmem::obj::transaction::commit();
+
+	/* At this point, redo log is stored durably on pmem. */
+
+	tx.reset(nullptr);
+
+	// tx.reset(new pmem::obj::transaction::manual(pop));
+
+	shared_global_lock_type lock(mtx);
+
+	// XXX - we could preallocate skip list nodes instead of kv pairs.
+	// For existing nodes we could just move the value (without tx, just atomic
+	// instructions) For non-existing, we also can just use atomic instructions.
+
+	for (auto &e : acc.get()) {
+		// XXX - do we want to keep all locks till the end of loop? PROBABLY YES
+		auto ret =
+			container->try_emplace(std::move(e.first), std::move(e.second));
+		if (!ret.second) {
+			auto &mapped = ret.first->second;
+			shared_node_lock_type lock(mapped.mtx);
+			mapped.val = std::move(e.second); // XXX - do swap and deallocate
+							  // it in a separate tx
+
+			// We can just build action log for swaps (or assignments?)
+			// XXX - if we'd hold global lock from the beginning of tx,
+			// we can build it in put? what about new nodes?
+		}
+	}
+
+	// XXX - we could hold locks so that we can insert in a single tx
+	// and could use preallocated buffer
+
+	return status::OK;
+}
+
+void transaction::abort()
+{
+	try {
+		pmem::obj::transaction::abort(0);
+	} catch (pmem::manual_tx_abort &) {
+		/* do nothing */
+	}
+}
+
+}
+}
 
 csmap::csmap(std::unique_ptr<internal::config> cfg)
     : pmemobj_engine_base(cfg, "pmemkv_csmap"), config(std::move(cfg))
@@ -19,6 +98,13 @@ csmap::csmap(std::unique_ptr<internal::config> cfg)
 csmap::~csmap()
 {
 	LOG("Stopped ok");
+}
+
+internal::transaction *csmap::begin_tx()
+{
+	auto redo_log_accessor = ptls->local().get();
+	return new internal::csmap::transaction(mtx, pmpool, std::move(redo_log_accessor),
+						container);
 }
 
 std::string csmap::name()
@@ -279,8 +365,10 @@ status csmap::remove(string_view key)
 
 void csmap::Recover()
 {
+	internal::csmap::pmem_type *pmem_ptr;
+
 	if (!OID_IS_NULL(*root_oid)) {
-		auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
+		pmem_ptr = static_cast<internal::csmap::pmem_type *>(
 			pmemobj_direct(*root_oid));
 
 		container = &pmem_ptr->map;
@@ -293,7 +381,7 @@ void csmap::Recover()
 			*root_oid =
 				pmem::obj::make_persistent<internal::csmap::pmem_type>()
 					.raw();
-			auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
+			pmem_ptr = static_cast<internal::csmap::pmem_type *>(
 				pmemobj_direct(*root_oid));
 			container = &pmem_ptr->map;
 			container->runtime_initialize();
@@ -301,6 +389,14 @@ void csmap::Recover()
 				internal::extract_comparator(*config));
 		});
 	}
+
+	if (!pmem_ptr->ptls) {
+		pmem::obj::transaction::run(pmpool, [&] { // XXX - merge with prev tx
+			pmem_ptr->ptls = pmem::obj::make_persistent<ptls_type>();
+		});
+	}
+
+	ptls = pmem_ptr->ptls.get();
 }
 
 } // namespace kv
