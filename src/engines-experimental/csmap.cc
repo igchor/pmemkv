@@ -8,6 +8,58 @@ namespace pmem
 {
 namespace kv
 {
+namespace internal
+{
+namespace csmap
+{
+transaction::transaction(
+	pmem::obj::pool_base &pop, global_mutex_type *mtx, map_type *container,
+	pmem::obj::experimental::self_relative_ptr<redo_log_type> *redo_log_location)
+    : pop(pop),
+      lock(*mtx),
+      container(container),
+      tx(new pmem::obj::transaction::manual(pop)),
+      redo_log_location(redo_log_location)
+{
+	redo_log = pmem::obj::make_persistent<redo_log_type>();
+}
+
+status transaction::put(string_view key, string_view value)
+{
+	redo_log->emplace_back(key, value);
+	return status::OK;
+}
+
+status transaction::commit()
+{
+	/* Store redo_log ptr on pmem */
+	if (*redo_log_location)
+		pmem::obj::delete_persistent<redo_log_type>(*redo_log_location);
+	*redo_log_location = redo_log;
+
+	pmem::obj::transaction::commit();
+	tx.reset(nullptr);
+
+	for (auto &e : *redo_log) {
+		auto result = container->try_emplace(e.first, e.second);
+
+		if (result.second == false) {
+			auto &it = result.first;
+			unique_node_lock_type lock(it->second.mtx);
+			pmem::obj::transaction::run(
+				pop, [&] { it->second.val.assign(e.second); });
+		}
+	}
+
+	return status::OK;
+}
+
+void transaction::abort()
+{
+	/* do nothing */
+}
+} /* namespace csmap */
+} /* namespace internal */
 
 csmap::csmap(std::unique_ptr<internal::config> cfg)
     : pmemobj_engine_base(cfg, "pmemkv_csmap"), config(std::move(cfg))
@@ -19,6 +71,13 @@ csmap::csmap(std::unique_ptr<internal::config> cfg)
 csmap::~csmap()
 {
 	LOG("Stopped ok");
+}
+
+internal::transaction *csmap::begin_tx()
+{
+	// auto redo_log_accessor = ptls->local().get();
+	return new internal::csmap::transaction(pmpool, &mtx, container,
+						&ptls->local().redo_log);
 }
 
 std::string csmap::name()
@@ -225,7 +284,7 @@ status csmap::get_between(string_view key1, string_view key2, get_kv_callback *c
 status csmap::exists(string_view key)
 {
 	LOG("exists for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
+	// check_outside_tx();
 
 	shared_global_lock_type lock(mtx);
 	return container->contains(key) ? status::OK : status::NOT_FOUND;
@@ -279,8 +338,10 @@ status csmap::remove(string_view key)
 
 void csmap::Recover()
 {
+	internal::csmap::pmem_type *pmem_ptr;
+
 	if (!OID_IS_NULL(*root_oid)) {
-		auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
+		pmem_ptr = static_cast<internal::csmap::pmem_type *>(
 			pmemobj_direct(*root_oid));
 
 		container = &pmem_ptr->map;
@@ -293,7 +354,7 @@ void csmap::Recover()
 			*root_oid =
 				pmem::obj::make_persistent<internal::csmap::pmem_type>()
 					.raw();
-			auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
+			pmem_ptr = static_cast<internal::csmap::pmem_type *>(
 				pmemobj_direct(*root_oid));
 			container = &pmem_ptr->map;
 			container->runtime_initialize();
@@ -301,6 +362,14 @@ void csmap::Recover()
 				internal::extract_comparator(*config));
 		});
 	}
+
+	if (!pmem_ptr->ptls) {
+		pmem::obj::transaction::run(pmpool, [&] { // XXX - merge with prev tx
+			pmem_ptr->ptls = pmem::obj::make_persistent<ptls_type>();
+		});
+	}
+
+	ptls = pmem_ptr->ptls.get();
 }
 
 } // namespace kv
