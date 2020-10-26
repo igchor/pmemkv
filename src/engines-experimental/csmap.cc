@@ -13,12 +13,10 @@ namespace internal
 namespace csmap
 {
 
-transaction::transaction(global_mutex_type &mtx, pmem::obj::pool_base &pop,
-			 typename redo_log_set_type::accessor &&acc, map_type *container)
+transaction::transaction(global_mutex_type &mtx, pmem::obj::pool_base &pop, map_type *container)
     : mtx(mtx),
       pop(pop),
-      tx(new pmem::obj::transaction::manual(pop)),
-      acc(std::move(acc)),
+      tx(nullptr),
       container(container)
 {
 }
@@ -31,16 +29,26 @@ status transaction::put(string_view key, string_view value)
 
 	shared_global_lock_type lock(mtx);
 
-	auto ret = container->try_emplace(key, value);
-		auto &mapped = ret.first->second;
-		if (!ret.second) {
-			mapped.val = value; // XXX - do swap and deallocate
-							  // it in a separate tx
+	// auto ret = container->try_emplace(key, value);
+	// 	auto &mapped = ret.first->second;
+	// 	if (!ret.second) {
+	// 		mapped.val = value; // XXX - do swap and deallocate
+	// 						  // it in a separate tx
 
-			// We can just build action log for swaps (or assignments?)
-			// XXX - if we'd hold global lock from the beginning of tx,
-			// we can build it in put? what about new nodes?
-		}
+	// 		// We can just build action log for swaps (or assignments?)
+	// 		// XXX - if we'd hold global lock from the beginning of tx,
+	// 		// we can build it in put? what about new nodes?
+	// 	}
+
+	auto result = container->try_emplace(key, value);
+
+	if (result.second == false) {
+		auto &it = result.first;
+		unique_node_lock_type lock(it->second.mtx);
+		//pmem::obj::transaction::run(pop, [&] {
+			it->second.val.assign(value.data(), value.size());
+		//});
+	}
 
 	return status::OK;
 
@@ -56,7 +64,7 @@ status transaction::put(string_view key, string_view value)
 // XXX - we could allow calling container->try_emplace in a transaction
 status transaction::commit()
 {
-	pmem::obj::transaction::commit();
+	//pmem::obj::transaction::commit();
 
 	/* At this point, redo log is stored durably on pmem. */
 
@@ -122,9 +130,8 @@ csmap::~csmap()
 
 internal::transaction *csmap::begin_tx()
 {
-	auto redo_log_accessor = ptls->local().get();
-	return new internal::csmap::transaction(mtx, pmpool, std::move(redo_log_accessor),
-						container);
+	// auto redo_log_accessor = ptls->local().get();
+	return new internal::csmap::transaction(mtx, pmpool, container);
 }
 
 std::string csmap::name()
@@ -410,13 +417,13 @@ void csmap::Recover()
 		});
 	}
 
-	if (!pmem_ptr->ptls) {
-		pmem::obj::transaction::run(pmpool, [&] { // XXX - merge with prev tx
-			pmem_ptr->ptls = pmem::obj::make_persistent<ptls_type>();
-		});
-	}
+	// if (!pmem_ptr->ptls) {
+	// 	pmem::obj::transaction::run(pmpool, [&] { // XXX - merge with prev tx
+	// 		pmem_ptr->ptls = pmem::obj::make_persistent<ptls_type>();
+	// 	});
+	// }
 
-	ptls = pmem_ptr->ptls.get();
+	// ptls = pmem_ptr->ptls.get();
 }
 
 } // namespace kv

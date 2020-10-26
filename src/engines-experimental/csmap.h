@@ -145,8 +145,7 @@ static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
 class transaction : public ::pmem::kv::internal::transaction {
 public:
-	transaction(global_mutex_type &mtx, pmem::obj::pool_base &pop,
-		    typename redo_log_set_type::accessor &&acc, map_type *container);
+	transaction(global_mutex_type &mtx, pmem::obj::pool_base &pop, map_type *container);
 	status put(string_view key, string_view value) final;
 	status commit() final;
 	void abort() final;
@@ -155,7 +154,6 @@ private:
 	global_mutex_type &mtx;
 	pmem::obj::pool_base &pop;
 	std::unique_ptr<pmem::obj::transaction::manual> tx;
-	typename redo_log_set_type::accessor acc;
 	map_type *container;
 };
 
@@ -220,7 +218,7 @@ private:
 	 */
 	global_mutex_type mtx;
 	container_type *container;
-	ptls_type *ptls;
+	// ptls_type *ptls;
 	std::unique_ptr<internal::config> config;
 };
 
