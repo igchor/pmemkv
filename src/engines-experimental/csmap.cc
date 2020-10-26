@@ -25,53 +25,73 @@ transaction::transaction(global_mutex_type &mtx, pmem::obj::pool_base &pop,
 
 status transaction::put(string_view key, string_view value)
 {
-	assert(pmemobj_tx_stage == TX_STAGE_WORK);
+	assert(pmemobj_tx_stage() == TX_STAGE_WORK);
 
-	acc.get().emplace_back(key, value);
-	return status::OK;
-
-	// XXX - optimization for blind update : check if element exists, and if so
-	// just build action log for std::move(value) in csmap
-
-	// XXX - global lock would have to be held from start of tx until commit ends
-	// but we could use timed lock
-
-}
-
-status transaction::commit()
-{
-	pmem::obj::transaction::commit();
-
-	/* At this point, redo log is stored durably on pmem. */
-
-	tx.reset(nullptr);
-
-	// tx.reset(new pmem::obj::transaction::manual(pop));
+	// acc.get().emplace_back(key, value);
 
 	shared_global_lock_type lock(mtx);
 
-	// XXX - we could preallocate skip list nodes instead of kv pairs.
-	// For existing nodes we could just move the value (without tx, just atomic
-	// instructions) For non-existing, we also can just use atomic instructions.
-
-	for (auto &e : acc.get()) {
-		// XXX - do we want to keep all locks till the end of loop? PROBABLY YES
-		auto ret =
-			container->try_emplace(std::move(e.first), std::move(e.second));
+	auto ret = container->try_emplace(key, value);
+		auto &mapped = ret.first->second;
 		if (!ret.second) {
-			auto &mapped = ret.first->second;
-			shared_node_lock_type lock(mapped.mtx);
-			mapped.val = std::move(e.second); // XXX - do swap and deallocate
+			mapped.val = value; // XXX - do swap and deallocate
 							  // it in a separate tx
 
 			// We can just build action log for swaps (or assignments?)
 			// XXX - if we'd hold global lock from the beginning of tx,
 			// we can build it in put? what about new nodes?
 		}
-	}
 
-	// XXX - we could hold locks so that we can insert in a single tx
-	// and could use preallocated buffer
+	return status::OK;
+
+
+
+	// XXX - optimization for blind update : check if element exists, and if so
+	// just build action log for std::move(value) in csmap
+
+	// XXX - global lock would have to be held from start of tx until commit ends
+	// but we could use timed lock
+}
+
+// XXX - we could allow calling container->try_emplace in a transaction
+status transaction::commit()
+{
+	pmem::obj::transaction::commit();
+
+	/* At this point, redo log is stored durably on pmem. */
+
+	// tx.reset(nullptr);
+	// tx.reset(new pmem::obj::transaction::manual(pop));
+
+	// shared_global_lock_type lock(mtx);
+
+	// // XXX - we could preallocate skip list nodes instead of kv pairs.
+	// // For existing nodes we could just move the value (without tx, just atomic
+	// // instructions) For non-existing, we also can just use atomic instructions.
+
+	// std::vector<shared_node_lock_type> locks;
+	// locks.reserve(acc.get().size());
+
+	// for (auto &e : acc.get()) {
+	// 	// XXX - do we want to keep all locks till the end of loop? PROBABLY YES
+	// 	auto ret =
+	// 		container->try_emplace(std::move(e.first), std::move(e.second));
+	// 	auto &mapped = ret.first->second;
+	// 	locks.emplace_back(mapped.mtx);
+	// 	if (!ret.second) {
+	// 		mapped.val = std::move(e.second); // XXX - do swap and deallocate
+	// 						  // it in a separate tx
+
+	// 		// We can just build action log for swaps (or assignments?)
+	// 		// XXX - if we'd hold global lock from the beginning of tx,
+	// 		// we can build it in put? what about new nodes?
+	// 	}
+	// }
+
+	// // XXX - we could hold locks so that we can insert in a single tx
+	// // and could use preallocated buffer
+	// pmem::obj::transaction::commit();
+	// tx.reset(nullptr);
 
 	return status::OK;
 }

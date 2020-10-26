@@ -196,6 +196,27 @@ private:
 	pmemkv_config *_config;
 };
 
+class tx {
+public:
+	tx(pmemkv_tx *tx_) : tx_(tx_)
+	{
+	}
+
+	status put(string_view key, string_view value)
+	{
+		return (status)pmemkv_tx_put(tx_, key.data(), key.size(), value.data(),
+					     value.size());
+	}
+
+	status commit()
+	{
+		return (status)pmemkv_tx_commit(tx_);
+	}
+
+private:
+	pmemkv_tx *tx_;
+};
+
 /*! \class db
 	\brief Main pmemkv class, it provides functions to operate on data in database.
 
@@ -265,6 +286,11 @@ public:
 	status put(string_view key, string_view value) noexcept;
 	status remove(string_view key) noexcept;
 	status defrag(double start_percent = 0, double amount_percent = 100);
+
+	tx begin_tx()
+	{
+		return tx(pmemkv_tx_begin(_db));
+	}
 
 	std::string errormsg();
 

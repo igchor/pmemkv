@@ -70,7 +70,8 @@ int pmemkv_config_put_oid(pmemkv_config *config, PMEMoid *oid);
 pmemkv_tx *pmemkv_tx_begin(pmemkv_db *db);
 int pmemkv_tx_put(pmemkv_tx *tx, const char *k, size_t kb, const char *v, size_t vb);
 int pmemkv_tx_commit(pmemkv_tx *tx);
-void pmemkv_tx_abort(pmemkv_tx *tx);
+void pmemkv_tx_abort(
+	pmemkv_tx *tx); // XXX: Can abort ever fail? (for non-obj transactions)
 
 int pmemkv_open(const char *engine, pmemkv_config *config, pmemkv_db **db);
 void pmemkv_close(pmemkv_db *kv);

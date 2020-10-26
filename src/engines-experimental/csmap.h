@@ -73,21 +73,35 @@ struct redo_log_set {
 	using set_type = pmem::obj::experimental::radix_tree<set_key_type, redo_log_type>;
 
 	struct accessor {
-		accessor(set_type &set) : set(set)
+		accessor(set_type *set) : set(set)
 		{
-			thread_local size_t counter = 0;
+			//thread_local size_t counter = 0;
 
-			auto id = counter++;
-			auto ret = set.try_emplace(id);
+			//auto id = counter++;
+			// auto id = 1;
+			// auto ret = set->try_emplace(id);
 
-			/* There should be no entry with specified id. */
-			assert(ret.second);
-			entry = ret.first;
+			// /* There should be no entry with specified id. */
+			// assert(ret.second);
+			// entry = ret.first;
+		}
+
+		accessor(accessor&& acc) {
+			entry = acc.entry;
+			set = acc.set;
+
+			acc.set = nullptr;
 		}
 
 		~accessor()
 		{
-			set.erase(entry);
+			// //set.erase(entry);
+			// if (set) {
+			// 	assert(entry->key() == 1);
+			// 	assert(set->size() == 1);
+			// 	auto r = set->erase(entry->key());
+			// 	assert(r == 1);
+			// }
 		}
 
 		redo_log_type &get()
@@ -97,12 +111,12 @@ struct redo_log_set {
 
 	private:
 		typename set_type::iterator entry;
-		set_type &set;
+		set_type *set;
 	};
 
 	accessor get()
 	{
-		return accessor(redo_logs);
+		return accessor(&redo_logs);
 	}
 
 private:
