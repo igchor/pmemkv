@@ -44,6 +44,7 @@ static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 class transaction : public ::pmem::kv::internal::transaction {
 public:
 	transaction(pmem::obj::pool_base &pop, map_type *container): pop(pop), container(container) {
+		kv_pairs.reserve(10);
 	}
 
 	status put(string_view key, string_view value) final {
