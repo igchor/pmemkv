@@ -8,6 +8,8 @@
 
 #include <libpmemobj++/persistent_ptr.hpp>
 
+#include <libpmemobj++/container/vector.hpp>
+
 #include <libpmemobj++/experimental/inline_string.hpp>
 #include <libpmemobj++/experimental/radix_tree.hpp>
 
@@ -41,36 +43,34 @@ static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
 class transaction : public ::pmem::kv::internal::transaction {
 public:
-	transaction(pmem::obj::pool_base &pop, map_type *container): pop(pop), container(container), tx(new pmem::obj::transaction::manual(pop)) {
-
+	transaction(pmem::obj::pool_base &pop, map_type *container): pop(pop), container(container) {
 	}
+
 	status put(string_view key, string_view value) final {
-		auto result = container->try_emplace(key, value);
-
-		if (result.second == false) {
-			pmem::obj::transaction::run(pop,
-							[&] { result.first.assign_val(value); });
-		}
-
+		kv_pairs.emplace_back(key, value);
 		return status::OK;
 	}
 
 	status commit() final {
-		pmem::obj::transaction::commit();
+		pmem::obj::transaction::run(pop, [&] {
+		for (auto &e : kv_pairs) {
+			auto result = container->try_emplace(e.first, e.second);
+
+			if (result.second == false) {
+				result.first.assign_val(e.second);
+			}
+		}
+		});
+
 		return status::OK;
 	}
 	void abort() final {
-		try {
-			pmem::obj::transaction::abort(0);
-		} catch (pmem::manual_tx_abort &) {
-			/* do nothing */
-		}
 	}
 
 private:
 	pmem::obj::pool_base &pop;
 	map_type *container;
-	std::unique_ptr<pmem::obj::transaction::manual> tx;
+	std::vector<std::pair<string_view, string_view>> kv_pairs;
 };
 
 } /* namespace radix */
