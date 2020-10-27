@@ -679,6 +679,11 @@ if(ENGINE_CSMAP)
 			BINARY transaction_basic
 			TRACERS none memcheck pmemcheck
 			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE radix
+			BINARY transaction_basic
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake)
 endif(ENGINE_CSMAP)
 ################################################################################
 ###################################### VCMAP ###################################

@@ -16,7 +16,7 @@ namespace csmap
 transaction::transaction(global_mutex_type &mtx, pmem::obj::pool_base &pop, map_type *container)
     : mtx(mtx),
       pop(pop),
-      tx(nullptr),
+      tx(new pmem::obj::transaction::manual(pop)),
       container(container)
 {
 }
