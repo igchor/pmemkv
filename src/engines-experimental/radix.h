@@ -29,6 +29,8 @@ using map_type =
 	pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
 					    pmem::obj::experimental::inline_string>;
 
+using redo_log_type = pmem::obj::vector<map_type::node_handle>;
+
 struct pmem_type {
 	pmem_type() : map()
 	{
@@ -36,42 +38,47 @@ struct pmem_type {
 	}
 
 	map_type map;
-	uint64_t reserved[8];
+	pmem::obj::experimental::self_relative_ptr<redo_log_type> redo_log = nullptr;
+	uint64_t reserved[7];
 };
 
 static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
 class transaction : public ::pmem::kv::internal::transaction {
 public:
-	transaction(pmem::obj::pool_base &pop, map_type *container): pop(pop), container(container) {
-		kv_pairs.reserve(10);
+	transaction(pmem::obj::pool_base &pop, map_type *container, redo_log_type *redo_log): pop(pop), container(container), redo_log(redo_log), tx(new pmem::obj::transaction::manual(pop)) {
+		redo_log->reserve(10);
 	}
-
 	status put(string_view key, string_view value) final {
-		kv_pairs.emplace_back(key, value);
+		redo_log->push_back(map_type::node_type::make(nullptr, key, value));
 		return status::OK;
 	}
 
 	status commit() final {
-		pmem::obj::transaction::run(pop, [&] {
-		for (auto &e : kv_pairs) {
-			auto result = container->try_emplace(e.first, e.second);
+		for (auto &e : *redo_log) {
+			auto result = container->insert(std::move(e));
 
 			if (result.second == false) {
-				result.first.assign_val(e.second);
+				result.first.assign_val(e->value());
 			}
 		}
-		});
 
+		pmem::obj::transaction::commit();
 		return status::OK;
 	}
 	void abort() final {
+		try {
+			pmem::obj::transaction::abort(0);
+		} catch (pmem::manual_tx_abort &) {
+			/* do nothing */
+		}
 	}
 
 private:
 	pmem::obj::pool_base &pop;
 	map_type *container;
-	std::vector<std::pair<string_view, string_view>> kv_pairs;
+	redo_log_type *redo_log;
+	std::unique_ptr<pmem::obj::transaction::manual> tx;
 };
 
 } /* namespace radix */
@@ -126,7 +133,7 @@ public:
 	status remove(string_view key) final;
 
 	internal::transaction *begin_tx() final {
-		return new internal::radix::transaction(pmpool, container);
+		return new internal::radix::transaction(pmpool, container, redo_log);
 	}
 
 private:
@@ -139,6 +146,7 @@ private:
 
 	container_type *container;
 	std::unique_ptr<internal::config> config;
+	internal::radix::redo_log_type* redo_log;
 };
 
 } /* namespace kv */

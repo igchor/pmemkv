@@ -20,6 +20,10 @@ static void test_commit(pmemkv_db* kv)
 
 	// pmemkv_tx_commit(tx);
 
+	UT_ASSERT(pmemkv_exists(kv, "a", 1) == PMEMKV_STATUS_NOT_FOUND);
+	UT_ASSERT(pmemkv_exists(kv, "b", 1) == PMEMKV_STATUS_NOT_FOUND);
+	UT_ASSERT(pmemkv_exists(kv, "c", 1) == PMEMKV_STATUS_NOT_FOUND);
+
 	// UT_ASSERT(pmemkv_exists(kv, "a", 1) == PMEMKV_STATUS_OK);
 	// UT_ASSERT(pmemkv_exists(kv, "b", 1) == PMEMKV_STATUS_OK);
 	// UT_ASSERT(pmemkv_exists(kv, "c", 1) == PMEMKV_STATUS_OK);
