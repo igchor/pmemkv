@@ -274,6 +274,17 @@ void radix::Recover()
 			container = &pmem_ptr->map;
 		});
 	}
+
+				auto pmem_ptr = static_cast<internal::radix::pmem_type *>(
+				pmemobj_direct(*root_oid));
+
+	if (!pmem_ptr->redo_log) {
+		pmem::obj::transaction::run(pmpool, [&]{
+			pmem_ptr->redo_log = pmem::obj::make_persistent<internal::radix::redo_log_type>();
+		});
+	}
+
+	redo_log = pmem_ptr->redo_log.get();
 }
 
 } // namespace kv
