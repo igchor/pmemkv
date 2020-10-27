@@ -280,7 +280,7 @@ void radix::Recover()
 
 	if (!pmem_ptr->redo_log) {
 		pmem::obj::transaction::run(pmpool, [&]{
-			pmem_ptr->redo_log = pmem::obj::make_persistent<internal::radix::redo_log_type>();
+			pmem_ptr->redo_log = pmem::obj::make_persistent<internal::radix::redo_log_set>();
 		});
 	}
 

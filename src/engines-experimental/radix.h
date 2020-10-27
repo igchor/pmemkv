@@ -31,6 +31,56 @@ using map_type =
 
 using redo_log_type = pmem::obj::vector<map_type::node_handle>;
 
+using set_type = pmem::obj::experimental::radix_tree<size_t, redo_log_type>;
+
+struct redo_log_set {
+	struct accessor {
+		accessor(set_type *set) : set(set)
+		{
+			thread_local size_t counter = 0;
+
+			auto id = counter++;
+			auto ret = set->try_emplace(id);
+
+			/* There should be no entry with specified id. */
+			assert(ret.second);
+			entry = ret.first;
+		}
+
+		accessor(accessor&& acc) {
+			entry = acc.entry;
+			set = acc.set;
+
+			acc.set = nullptr;
+		}
+
+		void commit()
+		{
+			if (set) {
+				auto r = set->erase(entry->key());
+				assert(r == 1);
+			}
+		}
+
+		redo_log_type &get()
+		{
+			return entry->value();
+		}
+
+	private:
+		typename set_type::iterator entry;
+		set_type *set;
+	};
+
+	accessor get()
+	{
+		return accessor(&redo_logs);
+	}
+
+private:
+	set_type redo_logs;
+};
+
 struct pmem_type {
 	pmem_type() : map()
 	{
@@ -38,7 +88,7 @@ struct pmem_type {
 	}
 
 	map_type map;
-	pmem::obj::experimental::self_relative_ptr<redo_log_type> redo_log = nullptr;
+	pmem::obj::experimental::self_relative_ptr<redo_log_set> redo_log = nullptr;
 	uint64_t reserved[7];
 };
 
@@ -46,16 +96,16 @@ static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
 class transaction : public ::pmem::kv::internal::transaction {
 public:
-	transaction(pmem::obj::pool_base &pop, map_type *container, redo_log_type *redo_log): pop(pop), container(container), redo_log(redo_log), tx(new pmem::obj::transaction::manual(pop)) {
-		
+	transaction(pmem::obj::pool_base &pop, map_type *container, typename redo_log_set::accessor &&acc): pop(pop), container(container), redo_log(redo_log), tx(new pmem::obj::transaction::manual(pop)), acc(std::move(acc)) {
+		acc.get().reserve(10);
 	}
 	status put(string_view key, string_view value) final {
-		redo_log->push_back(map_type::node_type::make(nullptr, key, value));
+		acc.get().push_back(map_type::node_type::make(nullptr, key, value));
 		return status::OK;
 	}
 
 	status commit() final {
-		for (auto &e : *redo_log) {
+		for (auto &e : acc.get()) {
 			auto result = container->insert(std::move(e));
 
 			if (result.second == false) {
@@ -63,7 +113,7 @@ public:
 			}
 		}
 
-		redo_log->clear();
+		acc.commit();
 
 		pmem::obj::transaction::commit();
 		return status::OK;
@@ -81,6 +131,7 @@ private:
 	map_type *container;
 	redo_log_type *redo_log;
 	std::unique_ptr<pmem::obj::transaction::manual> tx;
+	typename redo_log_set::accessor acc;
 };
 
 } /* namespace radix */
@@ -135,7 +186,7 @@ public:
 	status remove(string_view key) final;
 
 	internal::transaction *begin_tx() final {
-		return new internal::radix::transaction(pmpool, container, redo_log);
+		return new internal::radix::transaction(pmpool, container, redo_log->get());
 	}
 
 private:
@@ -148,7 +199,7 @@ private:
 
 	container_type *container;
 	std::unique_ptr<internal::config> config;
-	internal::radix::redo_log_type* redo_log;
+	internal::radix::redo_log_set* redo_log;
 };
 
 } /* namespace kv */
