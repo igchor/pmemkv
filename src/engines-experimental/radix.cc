@@ -13,30 +13,32 @@ namespace internal
 namespace radix
 {
 transaction::transaction(pmem::obj::pool_base &pop, map_type *container)
-    : pop(pop), container(container)
+    : pop(pop), container(container), tx(new pmem::obj::transaction::manual(pop))
 {
+	values = pmem::obj::make_persistent<pmem::obj::vector<pmem::obj::string>>();
 }
 
 status transaction::put(string_view key, string_view value)
 {
-	v.emplace_back(std::piecewise_construct,
-		       std::forward_as_tuple(key.data(), key.size()),
-		       std::forward_as_tuple(value.data(), value.size()));
+	keys.emplace_back(key.data(), key.size());
+	values->emplace_back(value.data(), value.size());
 	return status::OK;
 }
 
 status transaction::commit()
 {
-	pmem::obj::transaction::run(pop, [&] {
-		for (auto &e : v) {
-			auto result = container->try_emplace(e.first, e.second);
+	for (int i = 0; i < keys.size(); i++) {
+		auto result = container->try_emplace(keys[i], std::move((*values)[i]));
 
-			if (result.second == false) {
-				result.first.assign_val(e.second);
-			}
+		if (result.second == false) {
+			result.first->value() = std::move((*values)[i]);
 		}
-	});
+	}
 
+	pmem::obj::delete_persistent<pmem::obj::vector<pmem::obj::string>>(values);
+
+	pmem::obj::transaction::commit();
+	
 	return status::OK;
 }
 
@@ -242,7 +244,7 @@ status radix::get_between(string_view key1, string_view key2, get_kv_callback *c
 status radix::exists(string_view key)
 {
 	LOG("exists for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
+	//check_outside_tx();
 
 	return container->find(key) != container->end() ? status::OK : status::NOT_FOUND;
 }
