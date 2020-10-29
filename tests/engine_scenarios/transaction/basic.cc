@@ -81,7 +81,7 @@ static void test(int argc, char *argv[])
 	int s = pmemkv_open(argv[1], C_CONFIG_FROM_JSON(argv[2]), &kv);
 	UT_ASSERTeq(s, PMEMKV_STATUS_OK);
 
-	test_abort(kv);
+	// test_abort(kv);
 	test_commit(kv);
 	test_batched_updates(kv);
 
