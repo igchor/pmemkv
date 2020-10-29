@@ -47,7 +47,7 @@ static void test_batched_updates(pmemkv_db* kv)
 	const int BATCH_SIZE = 10;
 
 	auto gen_key = [](int b, int i) {
-		return std::to_string(b) + ";" + std::to_string(i);
+		return std::to_string(b) + ";" + std::to_string(i) + std::string(40, 'x');
 	};
 
 	for (int i = 0; i < NUM_BATCH; i++) {

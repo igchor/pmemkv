@@ -25,7 +25,7 @@ namespace radix
 
 using map_type =
 	pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
-					    pmem::obj::experimental::inline_string>;
+					    pmem::obj::string>;
 
 struct pmem_type {
 	pmem_type() : map()
@@ -48,7 +48,9 @@ public:
 
 private:
 	pmem::obj::pool_base &pop;
-	std::vector<std::pair<std::string, std::string>> v;
+	std::vector<std::string> keys;
+	std::vector<pmem::obj::string> values;
+	std::vector<pobj_action> acts;
 	map_type *container;
 };
 
