@@ -16,6 +16,8 @@
 #include <mutex>
 #include <shared_mutex>
 
+#include <libpmemobj/action_base.h>
+
 namespace pmem
 {
 namespace kv
@@ -27,7 +29,7 @@ namespace radix
 
 using map_type =
 	pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
-					    pmem::obj::vector<char>>;
+					    pmem::obj::experimental::inline_string>;
 
 struct pmem_type {
 	pmem_type() : map()
@@ -41,6 +43,48 @@ struct pmem_type {
 
 static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
+template <typename T>
+struct actions {
+	actions(obj::pool_base p): pop(p) {
+	}
+
+	~actions() {
+		if (acts.size()) {
+			pmemobj_cancel(pop.handle(), acts.data(), acts.size());
+		}
+	}
+
+	obj::persistent_ptr<T> reserve(size_t n) {
+		acts.emplace_back();
+		obj::persistent_ptr<T> ptr = pmemobj_reserve(pop.handle(), &acts.back(), n * sizeof(T), 0);
+
+		if (ptr == nullptr) {
+				throw std::bad_alloc{};
+		}
+
+		return ptr;
+	}
+
+	void publish() {
+		auto ret = pmemobj_publish(pop.handle(), acts.data(), acts.size());
+		if (ret)
+			throw std::runtime_error("XXX");
+
+		acts.clear();
+	}
+
+	void tx_publish() {
+		auto ret = pmemobj_tx_publish(acts.data(), acts.size());
+		if (ret)
+			throw std::runtime_error("XXX");
+
+		acts.clear();
+	}
+
+	std::vector<pobj_action> acts;
+	obj::pool_base pop;
+};
+
 class transaction : public ::pmem::kv::internal::transaction {
 public:
 	transaction(pmem::obj::pool_base &pop, map_type *container);
@@ -50,9 +94,8 @@ public:
 
 private:
 	pmem::obj::pool_base &pop;
-	std::vector<std::string> keys;
-	std::vector<std::pair<PMEMoid, size_t>> values;
-	std::vector<pobj_action> acts;
+	std::vector<typename map_type::node_handle> nodes;
+	actions<char> acts;
 	map_type *container;
 };
 

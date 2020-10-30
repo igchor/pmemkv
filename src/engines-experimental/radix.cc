@@ -12,22 +12,37 @@ namespace internal
 {
 namespace radix
 {
+
+template <typename T>
+struct intent_allocator {
+	using value_type = T;
+	using pointer = obj::persistent_ptr<T>;
+	using const_pointer = obj::persistent_ptr<const T>;
+	using reference = T&;
+	using const_reference = const T&;
+	using size_type = std::size_t;
+
+	intent_allocator(actions<T> &acts): acts(acts) {
+
+	}
+
+	pointer allocate(size_t n, const_pointer = 0) {
+		return acts.reserve(n);
+	}
+
+	actions<T> &acts;
+};
+
 transaction::transaction(pmem::obj::pool_base &pop, map_type *container)
-    : pop(pop), container(container)
+    : pop(pop), container(container), acts(pop)
 {
-	values.reserve(10);
+	nodes.reserve(10);
 }
 
 status transaction::put(string_view key, string_view value)
 {
-	keys.emplace_back(key.data(), key.size());
-
-	acts.emplace_back();
-	auto oid = pmemobj_reserve(pop.handle(), &acts.back(), value.size(), 0);
-
-	values.emplace_back(oid, value.size());
-
-	pmemobj_memcpy(pop.handle(), pmemobj_direct(oid), value.data(), value.size(), PMEMOBJ_F_MEM_NODRAIN);
+	auto node = map_type::node_type::make(key, value, intent_allocator<char>(acts));
+	nodes.push_back(node);
 
 	return status::OK;
 }
@@ -35,15 +50,14 @@ status transaction::put(string_view key, string_view value)
 status transaction::commit()
 {
 	pmem::obj::transaction::run(pop, [&]{
-		for (int i = 0; i < keys.size(); i++) {
-			auto result = container->try_emplace(keys[i]);
+		for (auto &n : nodes) {
+			auto result = container->insert(std::move(n));
 
-			result.first->value()._size = values[i].second;
-			result.first->value()._capacity = values[i].second;
-			result.first->value()._data = values[i].first;
+			if (!result.second)
+				result.first.replace_node(std::move(n));
 		}
 
-		pmemobj_tx_publish(acts.data(), acts.size());
+		acts.tx_publish();
 	});
 	
 	return status::OK;
@@ -278,11 +292,11 @@ status radix::put(string_view key, string_view value)
 		       << ", value.size=" << std::to_string(value.size()));
 	check_outside_tx();
 
-	auto result = container->try_emplace(key, value.data(), value.data() + value.size());
+	auto result = container->try_emplace(key, value);
 
 	if (result.second == false) {
 		pmem::obj::transaction::run(pmpool,
-					    [&] { result.first->value().assign(value.data(), value.data() + value.size()); });
+					    [&] { result.first.assign_val(value); });
 	}
 
 	return status::OK;
