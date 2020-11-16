@@ -8,6 +8,72 @@ namespace pmem
 {
 namespace kv
 {
+namespace internal
+{
+namespace csmap
+{
+transaction::transaction(pmem::obj::pool_base &pop, global_mutex_type &mtx,
+			 map_type &container, redo_log_type &redo_log)
+    : pop(pop), lock(mtx), container(container), redo_log(redo_log)
+{
+}
+
+status transaction::put(string_view key, string_view value)
+{
+	kvs.emplace_back(std::piecewise_construct,
+			 std::forward_as_tuple(key.data(), key.size()),
+			 std::forward_as_tuple(value.data(), value.size()));
+
+	return status::OK;
+}
+
+status transaction::commit()
+{
+	obj::transaction::run(pop, [&] {
+		redo_log.reserve(kvs.size());
+
+		for (auto &kv : kvs)
+			redo_log.emplace_back(kv.first, kv.second);
+	});
+
+	std::vector<unique_node_lock_type> locks;
+	locks.reserve(kvs.size());
+
+	std::vector<typename map_type::iterator> elements;
+	elements.reserve(kvs.size());
+
+	for (auto &e : kvs) {
+		auto key = obj::string_view(e.first.data(), e.first.size());
+		auto value = obj::string_view(e.second.data(), e.second.size());
+
+		auto result = container.try_emplace(key, value, locks);
+
+		if (!result.second)
+			locks.emplace_back(result.first->second.mtx);
+
+		elements.emplace_back(result.first);
+	}
+
+	obj::transaction::run(pop, [&] {
+		for (size_t i = 0; i < elements.size(); i++) {
+			auto &it = elements[i];
+			auto &value = kvs[i].second;
+
+			it->second.val.assign(value.data(), value.size());
+		}
+
+		redo_log.clear();
+	});
+
+	return status::OK;
+}
+
+void transaction::abort()
+{
+	/* do nothing */
+}
+} /* namespace csmap */
+} /* namespace internal */
 
 csmap::csmap(std::unique_ptr<internal::config> cfg)
     : pmemobj_engine_base(cfg, "pmemkv_csmap"), config(std::move(cfg))
@@ -19,6 +85,12 @@ csmap::csmap(std::unique_ptr<internal::config> cfg)
 csmap::~csmap()
 {
 	LOG("Stopped ok");
+}
+
+internal::transaction *csmap::begin_tx()
+{
+	return new internal::csmap::transaction(pmpool, mtx, *container,
+						*ptls->local().redo_log);
 }
 
 std::string csmap::name()
@@ -277,10 +349,29 @@ status csmap::remove(string_view key)
 	return container->unsafe_erase(key) > 0 ? status::OK : status::NOT_FOUND;
 }
 
+void csmap::redo_tx()
+{
+	for (auto &thread_data : *ptls) {
+		for (auto &kv : *thread_data.redo_log) {
+			auto result = container->try_emplace(kv.first, kv.second);
+
+			if (result.second == false) {
+				auto &it = result.first;
+				pmem::obj::transaction::run(pmpool, [&] {
+					it->second.val.assign(kv.second.data(),
+							      kv.second.size());
+				});
+			}
+		}
+	}
+}
+
 void csmap::Recover()
 {
+	internal::csmap::pmem_type *pmem_ptr;
+
 	if (!OID_IS_NULL(*root_oid)) {
-		auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
+		pmem_ptr = static_cast<internal::csmap::pmem_type *>(
 			pmemobj_direct(*root_oid));
 
 		container = &pmem_ptr->map;
@@ -293,7 +384,7 @@ void csmap::Recover()
 			*root_oid =
 				pmem::obj::make_persistent<internal::csmap::pmem_type>()
 					.raw();
-			auto pmem_ptr = static_cast<internal::csmap::pmem_type *>(
+			pmem_ptr = static_cast<internal::csmap::pmem_type *>(
 				pmemobj_direct(*root_oid));
 			container = &pmem_ptr->map;
 			container->runtime_initialize();
@@ -301,6 +392,17 @@ void csmap::Recover()
 				internal::extract_comparator(*config));
 		});
 	}
+
+	if (!pmem_ptr->ptls) {
+		pmem::obj::transaction::run(pmpool, [&] { // XXX - merge with prev tx
+			pmem_ptr->ptls = pmem::obj::make_persistent<ptls_type>();
+		});
+	}
+
+	ptls = pmem_ptr->ptls.get();
+
+	// XXX - test this
+	redo_tx();
 }
 
 } // namespace kv
