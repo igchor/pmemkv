@@ -33,7 +33,7 @@ status transaction::commit()
 		redo_log.reserve(kvs.size());
 
 		for (auto &kv : kvs)
-			redo_log.emplace_back(kv.first, kv.second);
+			redo_log.emplace_back(container.make_node(kv.first, kv.second));
 	});
 
 	std::vector<unique_node_lock_type> locks;
@@ -46,13 +46,12 @@ status transaction::commit()
 	values.reserve(kvs.size());
 
 	for (auto &kv : redo_log) {
-		auto result = container.try_emplace(std::move(kv.first),
-						    std::move(kv.second), locks);
+		auto result = container.insert(kv); // XXX: should take ownerhip
 
 		if (!result.second) {
 			locks.emplace_back(result.first->second.mtx);
 			elements.emplace_back(result.first);
-			values.emplace_back(&kv.second);
+			values.emplace_back(&kv.value());
 		} /* Otherwise the lock was already locked in the node ctor. */
 	}
 
@@ -62,7 +61,7 @@ status transaction::commit()
 	obj::transaction::run(pop, [&] {
 		for (size_t i = 0; i < elements.size(); i++) {
 			auto &it = elements[i];
-			auto &value = redo_log[i].second;
+			auto &value = *values[i];
 
 			it->second.val.assign(std::move(value));
 		}

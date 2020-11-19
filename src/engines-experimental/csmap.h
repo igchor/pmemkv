@@ -3,6 +3,9 @@
 
 #pragma once
 
+#define private public
+#define protected public
+
 #include "../comparator/pmemobj_comparator.h"
 #include "../pmemobj_engine.h"
 
@@ -72,7 +75,7 @@ static_assert(sizeof(mapped_type) == 96, "");
 using map_type = pmem::obj::experimental::concurrent_map<key_type, mapped_type,
 							 internal::pmemobj_compare>;
 
-using redo_log_entry_type = pmem::detail::pair<key_type, value_type>;
+using redo_log_entry_type = typename map_type::persistent_node_ptr;
 using redo_log_type = pmem::obj::vector<redo_log_entry_type>;
 
 struct ptls_entry {
