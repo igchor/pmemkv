@@ -222,12 +222,11 @@ if(ENGINE_CMAP)
 			SCRIPT pmemobj_based/default.cmake
 			PARAMS 1000 100 200)
 
-	# XXX: https://github.com/pmem/libpmemobj-cpp/issues/516
-	# add_engine_test(ENGINE cmap
-	# BINARY error_handling_oom
-	# TRACERS none
-	# SCRIPT pmemobj_based/default.cmake
-	# DB_SIZE 50M)
+	add_engine_test(ENGINE cmap
+			BINARY error_handling_oom
+			TRACERS none
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 50M)
 
 	add_engine_test(ENGINE cmap
 			BINARY iterate
@@ -444,12 +443,11 @@ if(ENGINE_CSMAP)
 			SCRIPT pmemobj_based/default.cmake
 			PARAMS 1000 100 200)
 
-	# XXX: investigate failure (possibly https://github.com/pmem/libpmemobj-cpp/issues/516)
-	# add_engine_test(ENGINE csmap
-	# BINARY error_handling_oom
-	# TRACERS none
-	# SCRIPT pmemobj_based/default.cmake
-	# DB_SIZE 50M)
+	add_engine_test(ENGINE csmap
+			BINARY error_handling_oom
+			TRACERS none
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 50M)
 
 	add_engine_test(ENGINE csmap
 			BINARY iterate
@@ -1153,12 +1151,11 @@ if(ENGINE_STREE)
 			SCRIPT pmemobj_based/default.cmake
 			PARAMS 1000 20 200)
 
-	# XXX: investigate failure (possibly https://github.com/pmem/libpmemobj-cpp/issues/516)
-	# add_engine_test(ENGINE stree
-	# BINARY error_handling_oom
-	# TRACERS none memcheck
-	# SCRIPT pmemobj_based/default.cmake
-	# DB_SIZE 20M)
+	add_engine_test(ENGINE stree
+			BINARY error_handling_oom
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 20M)
 
 	add_engine_test(ENGINE stree
 			BINARY iterate
@@ -1233,19 +1230,19 @@ if(ENGINE_STREE)
 	# SCRIPT pmemobj_based/default.cmake
 	# PARAMS 1000 100 200)
 
-	# XXX: investigate failure (possibly https://github.com/pmem/libpmemobj-cpp/issues/516)
-	# add_engine_test(ENGINE stree
-	# BINARY pmemobj_error_handling_tx_oom
-	# TRACERS none
-	# SCRIPT pmemobj_based/default.cmake
-	# DB_SIZE 200M)
-	# if(TESTS_LONG)
-	# add_engine_test(ENGINE stree
-	# BINARY pmemobj_error_handling_tx_oom
-	# TRACERS memcheck
-	# SCRIPT pmemobj_based/default.cmake
-	# DB_SIZE 200M)
-	# endif()
+	add_engine_test(ENGINE stree
+			BINARY pmemobj_error_handling_tx_oom
+			TRACERS none
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 200M)
+
+	if(TESTS_LONG)
+		add_engine_test(ENGINE stree
+				BINARY pmemobj_error_handling_tx_oom
+				TRACERS memcheck
+				SCRIPT pmemobj_based/default.cmake
+				DB_SIZE 200M)
+	endif()
 
 	add_engine_test(ENGINE stree
 			BINARY pmemobj_put_get_std_map_oid
