@@ -56,6 +56,9 @@ status cmap_8_8::exists(string_view key)
 	LOG("exists for key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 	auto k = *((uint64_t*)key.data());
+
+	auto lock = lock_write(k);
+
 	return container->count(k) == 1 ? status::OK : status::NOT_FOUND;
 }
 
@@ -65,6 +68,9 @@ status cmap_8_8::get(string_view key, get_v_callback *callback, void *arg)
 	check_outside_tx();
 	internal::cmap_8_8::map_t::const_accessor result;
 	auto k = *((uint64_t*)key.data());
+
+	auto lock = lock_write(k);
+
 	bool found = container->find(result, k);
 	if (!found) {
 		LOG("  key not found");
@@ -79,9 +85,13 @@ status cmap_8_8::put(string_view key, string_view value)
 {
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
+	
 	check_outside_tx();
+
 	auto k = *((uint64_t*)key.data());
 	auto v = *((uint64_t*)value.data());
+
+	auto lock = lock_write(k);
 
 	container->insert_or_assign(k, v);
 
@@ -133,6 +143,10 @@ void cmap_8_8::Recover()
 			container->runtime_initialize();
 		});
 	}
+
+	mtxs = new tbb::spin_rw_mutex[N_MTXS];
+
+	container->rehash(N_MTXS);
 }
 
 } // namespace kv
