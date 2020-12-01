@@ -83,6 +83,10 @@ set(SOURCE_FILES
 	src/iterator.h
 	src/iterator.cc
 )
+list(APPEND SOURCE_FILES
+	src/engines/cmap_8_8.h
+	src/engines/cmap_8_8.cc)
+
 # Add each engine source separately
 if(ENGINE_CMAP)
 	list(APPEND SOURCE_FILES

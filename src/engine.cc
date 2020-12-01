@@ -5,6 +5,8 @@
 
 #include "engines/blackhole.h"
 
+#include "engines/cmap_8_8.h"
+
 #ifdef ENGINE_VSMAP
 #include "engines/vsmap.h"
 #endif
@@ -53,6 +55,7 @@ engine_base::~engine_base()
 }
 
 static constexpr const char *available_engines = "blackhole"
+						 ", cmap_8_8"
 #ifdef ENGINE_CMAP
 						 ", cmap"
 #endif
@@ -93,6 +96,12 @@ engine_base::create_engine(const std::string &engine,
 	if (engine == "blackhole")
 		return std::unique_ptr<engine_base>(
 			new pmem::kv::blackhole(std::move(cfg)));
+
+	if (engine == "cmap_8_8") {
+		engine_base::check_config_null(engine, cfg);
+		return std::unique_ptr<engine_base>(
+			new pmem::kv::cmap_8_8(std::move(cfg)));
+	}
 
 #ifdef ENGINE_CMAP
 	if (engine == "cmap") {
