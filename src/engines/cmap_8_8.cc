@@ -57,7 +57,8 @@ status cmap_8_8::exists(string_view key)
 	check_outside_tx();
 	auto k = *((uint64_t*)key.data());
 
-	auto lock = lock_write(k);
+	tbb::spin_rw_mutex::scoped_lock lock;
+	lock_write(k, lock);
 
 	return container->count(k) == 1 ? status::OK : status::NOT_FOUND;
 }
@@ -69,7 +70,8 @@ status cmap_8_8::get(string_view key, get_v_callback *callback, void *arg)
 	internal::cmap_8_8::map_t::const_accessor result;
 	auto k = *((uint64_t*)key.data());
 
-	auto lock = lock_write(k);
+	tbb::spin_rw_mutex::scoped_lock lock;
+	lock_write(k, lock);
 
 	bool found = container->find(result, k);
 	if (!found) {
@@ -91,7 +93,8 @@ status cmap_8_8::put(string_view key, string_view value)
 	auto k = *((uint64_t*)key.data());
 	auto v = *((uint64_t*)value.data());
 
-	auto lock = lock_write(k);
+	tbb::spin_rw_mutex::scoped_lock lock;
+	lock_write(k, lock);
 
 	container->insert_or_assign(k, v);
 

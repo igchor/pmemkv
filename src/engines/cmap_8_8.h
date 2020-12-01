@@ -83,8 +83,8 @@ private:
 
 	tbb::spin_rw_mutex *mtxs;
 
-	tbb::spin_rw_mutex::scoped_lock lock_write(uint64_t k) {
-		return tbb::spin_rw_mutex::scoped_lock(mtxs[std::hash<uint64_t>{}(k) & (N_MTXS - 1)], true);
+	void lock_write(uint64_t k, tbb::spin_rw_mutex::scoped_lock& lock) {
+		lock.acquire(mtxs[std::hash<uint64_t>{}(k) & (N_MTXS - 1)], true);
 	}
 };
 

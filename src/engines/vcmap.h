@@ -40,16 +40,12 @@ public:
 	status remove(string_view key) final;
 
 private:
-	typedef memkind_ns::allocator<char> ch_allocator_t;
-	typedef std::basic_string<char, std::char_traits<char>, ch_allocator_t>
-		pmem_string;
-	typedef memkind_ns::allocator<std::pair<pmem_string, pmem_string>> kv_allocator_t;
-	typedef tbb::concurrent_hash_map<pmem_string, pmem_string,
-					 tbb::tbb_hash_compare<pmem_string>,
+	typedef memkind_ns::allocator<std::pair<const uint64_t, uint64_t>> kv_allocator_t;
+	typedef tbb::concurrent_hash_map<uint64_t, uint64_t,
+					 tbb::tbb_hash_compare<uint64_t>,
 					 std::scoped_allocator_adaptor<kv_allocator_t>>
 		map_t;
 	kv_allocator_t kv_allocator;
-	ch_allocator_t ch_allocator;
 	map_t pmem_kv_container;
 };
 
