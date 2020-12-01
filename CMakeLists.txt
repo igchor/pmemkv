@@ -77,6 +77,10 @@ set(SOURCE_FILES
 	src/out.cc
 	src/out.h
 )
+list(APPEND SOURCE_FILES
+	src/engines/cmap_8_8.h
+	src/engines/cmap_8_8.cc)
+
 # Add each engine source separately
 if(ENGINE_CMAP)
 	list(APPEND SOURCE_FILES

@@ -222,6 +222,13 @@ if(ENGINE_CMAP)
 			SCRIPT pmemobj_based/default.cmake
 			PARAMS 1000 100 200)
 
+	
+			add_engine_test(ENGINE cmap_8_8
+			BINARY put_get_std_map
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 1000 8 8)
+
 	# XXX: https://github.com/pmem/libpmemobj-cpp/issues/516
 	# add_engine_test(ENGINE cmap
 	# BINARY error_handling_oom
