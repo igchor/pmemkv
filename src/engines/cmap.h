@@ -103,9 +103,18 @@ private:
 	size_t hash(const char *str, size_t size) const
 	{
 		size_t h = 0;
-		for (size_t i = 0; i < size; ++i) {
-			h = static_cast<size_t>(str[i]) ^ (h * hash_multiplier);
+
+		if ((size & 7) == 0) {
+			for (size_t i = 0; i < size; i += 8) {
+				h = static_cast<size_t>(*((uint64_t *)&str[i])) ^
+					(h * hash_multiplier);
+			}
+		} else {
+			for (size_t i = 0; i < size; ++i) {
+				h = static_cast<size_t>(str[i]) ^ (h * hash_multiplier);
+			}
 		}
+
 		return h;
 	}
 };
