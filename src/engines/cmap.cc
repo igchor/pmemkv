@@ -10,6 +10,7 @@ namespace pmem
 {
 namespace kv
 {
+static __itt_string_handle* task_get;
 
 cmap::cmap(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg, "pmemkv")
 {
@@ -66,6 +67,7 @@ status cmap::exists(string_view key)
 
 status cmap::get(string_view key, get_v_callback *callback, void *arg)
 {
+	 __itt_task_begin(internal::cmap::domain, __itt_null, __itt_null, task_get);
 	LOG("get key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 
@@ -78,6 +80,7 @@ status cmap::get(string_view key, get_v_callback *callback, void *arg)
 	}
 
 	callback(result->second.c_str(), result->second.size(), arg);
+	__itt_task_end(internal::cmap::domain);
 	return status::OK;
 }
 
@@ -142,6 +145,10 @@ void cmap::Recover()
 
 	if (container->size() < N_MTXS)
 		container->rehash(N_MTXS);
+
+	internal::cmap::domain = __itt_domain_create("MyTraces.MyDomain");
+	internal::cmap::shMyTask = __itt_string_handle_create("My Task");
+	task_get = __itt_string_handle_create("Task get");
 }
 
 } // namespace kv

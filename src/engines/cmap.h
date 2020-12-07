@@ -9,7 +9,8 @@
 #include <libpmemobj++/container/concurrent_hash_map.hpp>
 #include <libpmemobj++/persistent_ptr.hpp>
 
-#include <tbb/spin_rw_mutex.h>
+#include "/home/igor/tbb-original/include/tbb/spin_rw_mutex.h"
+#include "/opt/intel/vtune_profiler_2020.3.0.612611/include/ittnotify.h"
 
 namespace pmem
 {
@@ -82,6 +83,9 @@ public:
 	}
 };
 
+static __itt_domain* domain;
+static __itt_string_handle* shMyTask;
+
 class string_hasher {
 	/* hash multiplier used by fibonacci hashing */
 	static const size_t hash_multiplier = 11400714819323198485ULL;
@@ -103,7 +107,7 @@ private:
 	size_t hash(const char *str, size_t size) const
 	{
 		size_t h = 0;
-
+		 __itt_task_begin(domain, __itt_null, __itt_null, shMyTask);
 		if ((size & 7) == 0) {
 			for (size_t i = 0; i < size; i += 8) {
 				h = static_cast<size_t>(*((uint64_t *)&str[i])) ^
@@ -114,6 +118,7 @@ private:
 				h = static_cast<size_t>(str[i]) ^ (h * hash_multiplier);
 			}
 		}
+		__itt_task_end(domain);
 
 		return h;
 	}
