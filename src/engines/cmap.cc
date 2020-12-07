@@ -10,7 +10,7 @@ namespace pmem
 {
 namespace kv
 {
-static __itt_string_handle* task_get;
+static __itt_string_handle *task_get;
 
 cmap::cmap(std::unique_ptr<internal::config> cfg) : pmemobj_engine_base(cfg, "pmemkv")
 {
@@ -62,16 +62,37 @@ status cmap::exists(string_view key)
 	check_outside_tx();
 
 	auto lock = lock_write(key);
+
+	if (internal::cmap::string_hasher{}(key) < DRAM_SIZE) {
+		tbb::concurrent_hash_map<string_view, string_view, internal::cmap::string_hasher>::const_accessor result;
+		bool found = dram_map.find(result, key);
+		if (!found)
+			return status::NOT_FOUND;
+		else
+			return status::OK;
+	}
+
 	return container->count(key) == 1 ? status::OK : status::NOT_FOUND;
 }
 
 status cmap::get(string_view key, get_v_callback *callback, void *arg)
 {
-	 __itt_task_begin(internal::cmap::domain, __itt_null, __itt_null, task_get);
+	__itt_task_begin(internal::cmap::domain, __itt_null, __itt_null, task_get);
 	LOG("get key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 
 	auto lock = lock_write(key);
+
+	if (internal::cmap::string_hasher{}(key) < DRAM_SIZE) {
+		tbb::concurrent_hash_map<string_view, string_view, internal::cmap::string_hasher>::const_accessor result;
+		bool found = dram_map.find(result, key);
+		if (!found)
+			return status::NOT_FOUND;
+
+		callback(result->second.data(), result->second.size(), arg);
+		return status::OK;
+	}
+
 	internal::cmap::map_t::const_accessor result;
 	bool found = container->find(result, key);
 	if (!found) {
@@ -93,6 +114,16 @@ status cmap::put(string_view key, string_view value)
 	auto lock = lock_write(key);
 	container->insert_or_assign(key, value);
 
+	if (internal::cmap::string_hasher{}(key) < DRAM_SIZE) {
+		internal::cmap::map_t::const_accessor result;
+		container->find(result, key);
+
+		std::pair<const string_view, string_view> kv = {
+			{new char[key.size()], key.size()},
+			{result->second.c_str(), result->second.size()}};
+		dram_map.insert(kv);
+	}
+
 	return status::OK;
 }
 
@@ -102,6 +133,15 @@ status cmap::remove(string_view key)
 	check_outside_tx();
 
 	auto lock = lock_write(key);
+
+	if (internal::cmap::string_hasher{}(key) < DRAM_SIZE) {
+		tbb::concurrent_hash_map<string_view, string_view, internal::cmap::string_hasher>::const_accessor result;
+		bool found = dram_map.find(result, key);
+		if (found)
+			delete result->first.data();
+		dram_map.erase(key);
+	}
+
 	bool erased = container->erase(key);
 	return erased ? status::OK : status::NOT_FOUND;
 }
@@ -145,6 +185,9 @@ void cmap::Recover()
 
 	if (container->size() < N_MTXS)
 		container->rehash(N_MTXS);
+
+	if (dram_map.size() < DRAM_SIZE)
+		dram_map.rehash(DRAM_SIZE);
 
 	internal::cmap::domain = __itt_domain_create("MyTraces.MyDomain");
 	internal::cmap::shMyTask = __itt_string_handle_create("My Task");

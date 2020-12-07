@@ -9,6 +9,10 @@
 #include <libpmemobj++/container/concurrent_hash_map.hpp>
 #include <libpmemobj++/persistent_ptr.hpp>
 
+//#include <tbb/spin_rw_mutex.h>
+
+#include <tbb/concurrent_hash_map.h>
+
 #include "/home/igor/tbb-original/include/tbb/spin_rw_mutex.h"
 #include "/opt/intel/vtune_profiler_2020.3.0.612611/include/ittnotify.h"
 
@@ -83,8 +87,8 @@ public:
 	}
 };
 
-static __itt_domain* domain;
-static __itt_string_handle* shMyTask;
+static __itt_domain *domain;
+static __itt_string_handle *shMyTask;
 
 class string_hasher {
 	/* hash multiplier used by fibonacci hashing */
@@ -103,11 +107,21 @@ public:
 		return hash(str.data(), str.size());
 	}
 
+	size_t hash(string_view str) const 
+	{
+		return hash(str.data(), str.size());
+	}
+
+	bool equal(string_view str1, string_view str2) const
+	{
+		return str1 == str2;
+	}
+
 private:
 	size_t hash(const char *str, size_t size) const
 	{
 		size_t h = 0;
-		 __itt_task_begin(domain, __itt_null, __itt_null, shMyTask);
+		__itt_task_begin(domain, __itt_null, __itt_null, shMyTask);
 		if ((size & 7) == 0) {
 			for (size_t i = 0; i < size; i += 8) {
 				h = static_cast<size_t>(*((uint64_t *)&str[i])) ^
@@ -157,7 +171,10 @@ public:
 	status defrag(double start_percent, double amount_percent) final;
 
 private:
+	tbb::concurrent_hash_map<string_view, string_view, internal::cmap::string_hasher> dram_map;
+
 	static constexpr size_t N_MTXS = 1024;
+	static constexpr size_t DRAM_SIZE = (1ULL << 29);
 
 	tbb::spin_rw_mutex *mtxs;
 
