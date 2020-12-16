@@ -10,7 +10,9 @@ namespace kv
 {
 
 radix::radix(std::unique_ptr<internal::config> cfg)
-    : pmemobj_engine_base(cfg, "pmemkv_radix"), config(std::move(cfg))
+    : pmemobj_engine_base(cfg, "pmemkv_radix"),
+      config(std::move(cfg)),
+      mtxs(internal::radix::SHARDS)
 {
 	Recover();
 	LOG("Started ok");
@@ -26,176 +28,32 @@ std::string radix::name()
 	return "radix";
 }
 
+static size_t hash(string_view key)
+{
+	return *((size_t *)key.data()) & (internal::radix::SHARDS - 1);
+	// return key.size() % internal::radix::SHARDS;
+}
+
 status radix::count_all(std::size_t &cnt)
 {
-	LOG("count_all");
-	check_outside_tx();
-	cnt = container->size();
-
-	return status::OK;
-}
-
-template <typename It>
-static std::size_t size(It first, It last)
-{
-	auto dist = std::distance(first, last);
-	assert(dist >= 0);
-
-	return static_cast<std::size_t>(dist);
-}
-
-status radix::count_above(string_view key, std::size_t &cnt)
-{
-	LOG("count_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->upper_bound(key);
-	auto last = container->end();
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status radix::count_equal_above(string_view key, std::size_t &cnt)
-{
-	LOG("count_equal_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->lower_bound(key);
-	auto last = container->end();
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status radix::count_equal_below(string_view key, std::size_t &cnt)
-{
-	LOG("count_equal_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->upper_bound(key);
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status radix::count_below(string_view key, std::size_t &cnt)
-{
-	LOG("count_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->lower_bound(key);
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status radix::count_between(string_view key1, string_view key2, std::size_t &cnt)
-{
-	LOG("count_between for key1=" << key1.data() << ", key2=" << key2.data());
-	check_outside_tx();
-
-	if (key1.compare(key2) < 0) {
-		auto first = container->upper_bound(key1);
-		auto last = container->lower_bound(key2);
-
-		cnt = size(first, last);
-	} else {
-		cnt = 0;
+	size_t size = 0;
+	for (size_t i = 0; i < internal::radix::SHARDS; i++) {
+		shared_lock_type lock(mtxs[i]);
+		size += container[i].size();
 	}
 
-	return status::OK;
-}
-
-status radix::iterate(typename container_type::const_iterator first,
-		      typename container_type::const_iterator last,
-		      get_kv_callback *callback, void *arg)
-{
-	for (auto it = first; it != last; ++it) {
-		string_view key = it->key();
-		string_view value = it->value();
-
-		auto ret =
-			callback(key.data(), key.size(), value.data(), value.size(), arg);
-
-		if (ret != 0)
-			return status::STOPPED_BY_CB;
-	}
+	cnt = size;
 
 	return status::OK;
 }
 
 status radix::get_all(get_kv_callback *callback, void *arg)
 {
-	LOG("get_all");
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->end();
-
-	return iterate(first, last, callback, arg);
-}
-
-status radix::get_above(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->upper_bound(key);
-	auto last = container->end();
-
-	return iterate(first, last, callback, arg);
-}
-
-status radix::get_equal_above(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_equal_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->lower_bound(key);
-	auto last = container->end();
-
-	return iterate(first, last, callback, arg);
-}
-
-status radix::get_equal_below(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_equal_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->upper_bound(key);
-
-	return iterate(first, last, callback, arg);
-}
-
-status radix::get_below(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->lower_bound(key);
-
-	return iterate(first, last, callback, arg);
-}
-
-status radix::get_between(string_view key1, string_view key2, get_kv_callback *callback,
-			  void *arg)
-{
-	LOG("get_between for key1=" << key1.data() << ", key2=" << key2.data());
-	check_outside_tx();
-
-	if (key1.compare(key2) < 0) {
-		auto first = container->upper_bound(key1);
-		auto last = container->lower_bound(key2);
-		return iterate(first, last, callback, arg);
+	for (size_t i = 0; i < internal::radix::SHARDS; i++) {
+		shared_lock_type lock(mtxs[i]);
+		for (auto it = container[i].begin(); it != container[i].end(); it++)
+			callback(it->key().data(), it->key().size(), it->value().data(),
+				 it->value().size(), arg);
 	}
 
 	return status::OK;
@@ -206,7 +64,11 @@ status radix::exists(string_view key)
 	LOG("exists for key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 
-	return container->find(key) != container->end() ? status::OK : status::NOT_FOUND;
+	auto shard = hash(key);
+	shared_lock_type lock(mtxs[shard]);
+
+	return container[shard].find(key) != container[shard].end() ? status::OK
+								    : status::NOT_FOUND;
 }
 
 status radix::get(string_view key, get_v_callback *callback, void *arg)
@@ -214,8 +76,11 @@ status radix::get(string_view key, get_v_callback *callback, void *arg)
 	LOG("get key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 
-	auto it = container->find(key);
-	if (it != container->end()) {
+	auto shard = hash(key);
+	shared_lock_type lock(mtxs[shard]);
+
+	auto it = container[shard].find(key);
+	if (it != container[shard].end()) {
 		auto value = string_view(it->value());
 		callback(value.data(), value.size(), arg);
 		return status::OK;
@@ -231,7 +96,10 @@ status radix::put(string_view key, string_view value)
 		       << ", value.size=" << std::to_string(value.size()));
 	check_outside_tx();
 
-	auto result = container->try_emplace(key, value);
+	auto shard = hash(key);
+	unique_lock_type lock(mtxs[shard]);
+
+	auto result = container[shard].try_emplace(key, value);
 
 	if (result.second == false) {
 		pmem::obj::transaction::run(pmpool,
@@ -246,12 +114,15 @@ status radix::remove(string_view key)
 	LOG("remove key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 
-	auto it = container->find(key);
+	auto shard = hash(key);
+	unique_lock_type lock(mtxs[shard]);
 
-	if (it == container->end())
+	auto it = container[shard].find(key);
+
+	if (it == container[shard].end())
 		return status::NOT_FOUND;
 
-	container->erase(it);
+	container[shard].erase(it);
 
 	return status::OK;
 }
@@ -262,7 +133,7 @@ void radix::Recover()
 		auto pmem_ptr = static_cast<internal::radix::pmem_type *>(
 			pmemobj_direct(*root_oid));
 
-		container = &pmem_ptr->map;
+		container = pmem_ptr->map.get();
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
@@ -271,7 +142,11 @@ void radix::Recover()
 					.raw();
 			auto pmem_ptr = static_cast<internal::radix::pmem_type *>(
 				pmemobj_direct(*root_oid));
-			container = &pmem_ptr->map;
+
+			pmem_ptr->map = obj::make_persistent<
+				internal::radix::map_type[internal::radix::SHARDS]>();
+
+			container = pmem_ptr->map.get();
 		});
 	}
 }

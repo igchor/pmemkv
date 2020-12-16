@@ -1314,6 +1314,54 @@ endif(ENGINE_STREE)
 ################################################################################
 ###################################### RADIX ###################################
 if(ENGINE_RADIX)
+add_engine_test(ENGINE radix
+BINARY concurrent_put_get_remove_params
+TRACERS none memcheck
+SCRIPT pmemobj_based/default.cmake
+PARAMS 8 50)
+
+if(TESTS_PMEMOBJ_DRD_HELGRIND)
+add_engine_test(ENGINE radix
+	BINARY concurrent_put_get_remove_params
+	TRACERS drd helgrind
+	SCRIPT pmemobj_based/default.cmake
+	PARAMS 8 50)
+endif()
+
+add_engine_test(ENGINE radix
+BINARY concurrent_put_get_remove_gen_params
+TRACERS none memcheck
+SCRIPT pmemobj_based/default.cmake
+PARAMS 8 50 100)
+
+if(TESTS_PMEMOBJ_DRD_HELGRIND)
+add_engine_test(ENGINE radix
+	BINARY concurrent_put_get_remove_gen_params
+	TRACERS drd helgrind
+	SCRIPT pmemobj_based/default.cmake
+	PARAMS 8 50 100)
+endif()
+
+add_engine_test(ENGINE radix
+BINARY concurrent_put_get_remove_single_op_params
+TRACERS none
+SCRIPT pmemobj_based/default.cmake
+PARAMS 1000)
+
+add_engine_test(ENGINE radix
+BINARY concurrent_put_get_remove_single_op_params
+TRACERS memcheck
+SCRIPT pmemobj_based/default.cmake
+PARAMS 400)
+
+if(TESTS_PMEMOBJ_DRD_HELGRIND)
+add_engine_test(ENGINE radix
+	BINARY concurrent_put_get_remove_single_op_params
+	TRACERS drd helgrind
+	SCRIPT pmemobj_based/default.cmake
+	PARAMS 250)
+endif()
+
 	add_engine_test(ENGINE radix
 			BINARY c_api_null_db_config
 			TRACERS none memcheck
