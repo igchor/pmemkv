@@ -35,6 +35,10 @@
 
 #include "engines-experimental/vcmap_dram_locks.h"
 
+#ifdef ENGINE_CMAP_DRAM_LOCKS
+#include "engines-experimental/cmap_dram_locks.h"
+#endif
+
 namespace pmem
 {
 namespace kv
@@ -144,6 +148,14 @@ engine_base::create_engine(const std::string &engine,
 		return std::unique_ptr<engine_base>(
 			new pmem::kv::vcmap_dram_locks(std::move(cfg)));
 	}
+
+#ifdef ENGINE_CMAP_DRAM_LOCKS
+	if (engine == "cmap_dram_locks") {
+		engine_base::check_config_null(engine, cfg);
+		return std::unique_ptr<engine_base>(
+			new pmem::kv::cmap_dram_locks(std::move(cfg)));
+	}
+#endif
 
 	throw internal::wrong_engine_name("Unknown engine name \"" + engine +
 					  "\". Available engines: " + available_engines);

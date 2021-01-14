@@ -413,6 +413,216 @@ if(ENGINE_CMAP)
 endif(ENGINE_CMAP)
 ################################################################################
 ###################################### CSMAP ###################################
+if(ENGINE_CMAP_DRAM_LOCKS)
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY c_api_null_db_config
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY put_get_remove
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY put_get_remove_charset_params
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 16 8)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY put_get_remove_long_key
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY put_get_remove_params
+			TRACERS none
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 4G PARAMS 400000)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY put_get_remove_params
+			TRACERS memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 1G PARAMS 4000)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY put_get_std_map
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 1000 100 200)
+
+	# XXX: https://github.com/pmem/libpmemobj-cpp/issues/516
+	# add_engine_test(ENGINE cmap
+	# BINARY error_handling_oom
+	# TRACERS none
+	# SCRIPT pmemobj_based/default.cmake
+	# DB_SIZE 50M)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY iterate
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY concurrent_put_get_remove_params
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 8 50)
+
+	if(TESTS_PMEMOBJ_DRD_HELGRIND)
+		add_engine_test(ENGINE cmap_dram_locks
+				BINARY concurrent_put_get_remove_params
+				TRACERS drd helgrind
+				SCRIPT pmemobj_based/default.cmake
+				PARAMS 8 50)
+	endif()
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY concurrent_put_get_remove_gen_params
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 8 50 100)
+
+	if(TESTS_PMEMOBJ_DRD_HELGRIND)
+		add_engine_test(ENGINE cmap_dram_locks
+				BINARY concurrent_put_get_remove_gen_params
+				TRACERS drd helgrind
+				SCRIPT pmemobj_based/default.cmake
+				PARAMS 8 50 100)
+	endif()
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY concurrent_put_get_remove_single_op_params
+			TRACERS none
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 1000)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY concurrent_put_get_remove_single_op_params
+			TRACERS memcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 400)
+
+	if(TESTS_PMEMOBJ_DRD_HELGRIND)
+		add_engine_test(ENGINE cmap_dram_locks
+				BINARY concurrent_put_get_remove_single_op_params
+				TRACERS drd helgrind
+				SCRIPT pmemobj_based/default.cmake
+				PARAMS 250)
+	endif()
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY persistent_put_get_std_map_multiple_reopen
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 1000 100 200)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY persistent_not_found_verify
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY persistent_overwrite_verify
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY persistent_put_remove_verify
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY persistent_put_verify
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY persistent_put_verify_asc_params
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake
+			DB_SIZE 1G PARAMS 4000)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY persistent_put_verify_desc_params
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/persistent/insert_check.cmake
+			DB_SIZE 1G PARAMS 4000)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY pmemobj_error_handling_tx_oom
+			TRACERS none
+			SCRIPT pmemobj_based/default.cmake
+			DB_SIZE 200M)
+
+	if(TESTS_LONG)
+		add_engine_test(ENGINE cmap_dram_locks
+				BINARY pmemobj_error_handling_tx_oom
+				TRACERS memcheck
+				SCRIPT pmemobj_based/default.cmake
+				DB_SIZE 200M)
+	endif()
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY pmemobj_error_handling_create
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/pmemobj/error_handling_create.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY pmemobj_error_handling_tx_oid
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/pmemobj/error_handling_tx_oid.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY pmemobj_error_handling_tx_path
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/pmemobj/error_handling_tx_path.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY pmemobj_error_handling_defrag
+			TRACERS none memcheck
+			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY pmemobj_put_get_std_map_defrag
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 1000 100 200)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY pmemobj_put_get_std_map_oid
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/pmemobj/put_get_std_map_oid.cmake
+			PARAMS 1000 100 200)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY put_get_std_map
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/pmemobj/put_get_std_map_force_create.cmake
+			PARAMS 1000 100 200)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY iterator_basic
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake)
+
+	add_engine_test(ENGINE cmap_dram_locks
+			BINARY iterator_concurrent
+			TRACERS none memcheck pmemcheck
+			SCRIPT pmemobj_based/default.cmake
+			PARAMS 8)
+
+	if(TESTS_PMEMOBJ_DRD_HELGRIND)
+		add_engine_test(ENGINE cmap_dram_locks
+				BINARY iterator_concurrent
+				TRACERS helgrind drd
+				SCRIPT pmemobj_based/default.cmake
+				PARAMS 8)
+	endif()
+endif(ENGINE_CMAP_DRAM_LOCKS)
+
 if(ENGINE_CSMAP)
 	add_engine_test(ENGINE csmap
 			BINARY c_api_null_db_config
