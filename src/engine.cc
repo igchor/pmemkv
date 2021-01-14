@@ -33,6 +33,8 @@
 #include "engines-experimental/tree3.h"
 #endif
 
+#include "engines-experimental/vcmap_dram_locks.h"
+
 namespace pmem
 {
 namespace kv
@@ -136,6 +138,12 @@ engine_base::create_engine(const std::string &engine,
 		return std::unique_ptr<engine_base>(new pmem::kv::stree(std::move(cfg)));
 	}
 #endif
+
+	if (engine == "vcmap_dram_locks") {
+		engine_base::check_config_null(engine, cfg);
+		return std::unique_ptr<engine_base>(
+			new pmem::kv::vcmap_dram_locks(std::move(cfg)));
+	}
 
 	throw internal::wrong_engine_name("Unknown engine name \"" + engine +
 					  "\". Available engines: " + available_engines);

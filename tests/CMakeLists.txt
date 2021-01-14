@@ -828,6 +828,99 @@ if(ENGINE_VCMAP)
 			SCRIPT memkind_based/default.cmake
 			PARAMS 8)
 endif(ENGINE_VCMAP)
+
+if(ENGINE_VCMAP_DRAM_LOCKS)
+add_engine_test(ENGINE vcmap_dram_locks
+			BINARY c_api_null_db_config
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY put_get_remove
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY put_get_remove_charset_params
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake
+			PARAMS 16 8)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY put_get_remove_long_key
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY put_get_remove_params
+			TRACERS none
+			SCRIPT memkind_based/default.cmake
+			DB_SIZE 4294967296 PARAMS 400000)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY put_get_remove_params
+			TRACERS memcheck
+			SCRIPT memkind_based/default.cmake
+			DB_SIZE 4294967296 PARAMS 4000)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY put_get_std_map
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake
+			PARAMS 1000 100 200)
+
+	# XXX: https://github.com/pmem/pmemkv/issues/623
+	# add_engine_test(ENGINE vcmap
+	# BINARY error_handling_oom
+	# TRACERS none memcheck
+	# SCRIPT memkind_based/default.cmake
+	# DB_SIZE 50485760)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY iterate
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY concurrent_put_get_remove_params
+			TRACERS none memcheck # XXX - tbb lock does not work well with drd or helgrind
+			SCRIPT memkind_based/default.cmake
+			PARAMS 8 50)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY concurrent_put_get_remove_gen_params
+			TRACERS none memcheck # XXX - tbb lock does not work well with drd or helgrind
+			SCRIPT memkind_based/default.cmake
+			PARAMS 8 50 100)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY concurrent_put_get_remove_single_op_params
+			TRACERS none # XXX - tbb lock does not work well with drd or helgrind
+			SCRIPT memkind_based/default.cmake
+			DB_SIZE "MIN_JEMALLOC_ARENA_SIZE" PARAMS 100)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY concurrent_put_get_remove_single_op_params
+			TRACERS memcheck # XXX - tbb lock does not work well with drd or helgrind
+			SCRIPT memkind_based/default.cmake
+			DB_SIZE "MIN_JEMALLOC_ARENA_SIZE" PARAMS 400)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY memkind_error_handling
+			TRACERS none memcheck
+			SCRIPT memkind_based/memkind/error_handling.cmake)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY iterator_basic
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake)
+
+	add_engine_test(ENGINE vcmap_dram_locks
+			BINARY iterator_concurrent
+			TRACERS none memcheck
+			SCRIPT memkind_based/default.cmake
+			PARAMS 8)
+endif(ENGINE_VCMAP_DRAM_LOCKS)
 ################################################################################
 ###################################### VSMAP ###################################
 if(ENGINE_VSMAP)

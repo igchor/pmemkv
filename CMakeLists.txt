@@ -28,6 +28,7 @@ option(USE_CCACHE "Use ccache if it is available in the system" ON)
 # By default all experimental engines are turned off.
 option(ENGINE_CMAP "enable cmap engine" ON)
 option(ENGINE_VCMAP "enable vcmap engine" ON)
+option(ENGINE_VCMAP_DRAM_LOCKS "enable vcmap engine" ON)
 option(ENGINE_VSMAP "enable vsmap engine" ON)
 option(ENGINE_CSMAP "enable experimental csmap engine (requires CXX_STANDARD to be set to value >= 14)" OFF)
 option(ENGINE_STREE "enable experimental stree engine" ON)
@@ -100,6 +101,12 @@ if(ENGINE_VCMAP)
 		src/engines/vcmap.cc
 	)
 endif()
+if(ENGINE_VCMAP_DRAM_LOCKS)
+	list(APPEND SOURCE_FILES
+		src/engines-experimental/vcmap_dram_locks.h
+		src/engines-experimental/vcmap_dram_locks.cc
+	)
+endif()
 if(ENGINE_VSMAP)
 	list(APPEND SOURCE_FILES
 		src/engines/vsmap.h
@@ -148,6 +155,12 @@ if(ENGINE_VCMAP)
 	message(STATUS "VCMAP engine is ON")
 else()
 	message(STATUS "VCMAP engine is OFF")
+endif()
+if(ENGINE_VCMAP_DRAM_LOCKS)
+	add_definitions(-DENGINE_VCMAP_DRAM_LOCKS)
+	message(STATUS "VCMAP_DRAM_LOCKS engine is ON")
+else()
+	message(STATUS "VCMAP_DRAM_LOCKS engine is OFF")
 endif()
 if(ENGINE_VSMAP)
 	add_definitions(-DENGINE_VSMAP)
