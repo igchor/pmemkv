@@ -36,6 +36,7 @@ option(ENGINE_CSMAP "enable experimental csmap engine (requires CXX_STANDARD to 
 option(ENGINE_STREE "enable experimental stree engine" ON)
 option(ENGINE_TREE3 "enable experimental tree3 engine" OFF)
 option(ENGINE_RADIX "enable experimental radix engine" OFF)
+option(ENGINE_NEW_MAP "enable experimental new_map engine" OFF)
 
 # ----------------------------------------------------------------- #
 ## Set required and useful variables
@@ -141,6 +142,12 @@ if(ENGINE_RADIX)
 		src/engines-experimental/radix.cc
 	)
 endif()
+if(ENGINE_NEW_MAP)
+	list(APPEND SOURCE_FILES
+		src/engines-experimental/new_map.h
+		src/engines-experimental/new_map.cc
+	)
+endif()
 
 # ----------------------------------------------------------------- #
 ## Setup defines and check status of each engine
@@ -190,6 +197,12 @@ if(ENGINE_RADIX)
 	message(STATUS "RADIX engine is ON")
 else()
 	message(STATUS "RADIX engine is OFF")
+endif()
+if(ENGINE_NEW_MAP)
+	add_definitions(-DENGINE_NEW_MAP)
+	message(STATUS "NEW_MAP is ON")
+else()
+	message(STATUS "NEW_MAP is OFF")
 endif()
 
 # ----------------------------------------------------------------- #
