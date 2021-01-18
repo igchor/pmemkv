@@ -38,6 +38,7 @@ option(ENGINE_TREE3 "enable experimental tree3 engine" OFF)
 option(ENGINE_RADIX "enable experimental radix engine" OFF)
 option(ENGINE_ROBINHOOD "enable experimental robinhood engine (requires CXX_STANDARD to be set to value >= 14)" OFF)
 option(ENGINE_DRAM_VCMAP "enable testing dram_vcmap engine" OFF)
+option(ENGINE_NEW_MAP "enable experimental new_map engine" OFF)
 
 # ----------------------------------------------------------------- #
 ## Set required and useful variables
@@ -155,6 +156,12 @@ if(ENGINE_DRAM_VCMAP)
 		src/engines-testing/dram_vcmap.cc
 	)
 endif()
+if(ENGINE_NEW_MAP)
+	list(APPEND SOURCE_FILES
+		src/engines-experimental/new_map.h
+		src/engines-experimental/new_map.cc
+	)
+endif()
 
 # ----------------------------------------------------------------- #
 ## Setup defines and check status of each engine
@@ -220,6 +227,12 @@ if(ENGINE_DRAM_VCMAP)
 	message(STATUS "DRAM_VCMAP engine is ON")
 else()
 	message(STATUS "DRAM_VCMAP engine is OFF")
+endif()
+if(ENGINE_NEW_MAP)
+	add_definitions(-DENGINE_NEW_MAP)
+	message(STATUS "NEW_MAP is ON")
+else()
+	message(STATUS "NEW_MAP is OFF")
 endif()
 
 # ----------------------------------------------------------------- #
