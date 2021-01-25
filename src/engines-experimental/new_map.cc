@@ -4,57 +4,11 @@
 #include "new_map.h"
 #include "../out.h"
 
+#include <set>
 namespace pmem
 {
 namespace kv
 {
-namespace internal
-{
-namespace new_map
-{
-transaction::transaction(pmem::obj::pool_base &pop, map_type *container)
-    : pop(pop), container(container)
-{
-}
-
-status transaction::put(string_view key, string_view value)
-{
-	log.insert(key, value);
-	return status::OK;
-}
-
-status transaction::remove(string_view key)
-{
-	log.remove(key);
-	return status::OK;
-}
-
-status transaction::commit()
-{
-	auto insert_cb = [&](const dram_log::element_type &e) {
-		auto result = container->try_emplace(e.first, e.second);
-
-		if (result.second == false)
-			result.first.assign_val(e.second);
-	};
-
-	auto remove_cb = [&](const dram_log::element_type &e) {
-		container->erase(e.first);
-	};
-
-	pmem::obj::transaction::run(pop, [&] { log.foreach (insert_cb, remove_cb); });
-
-	log.clear();
-
-	return status::OK;
-}
-
-void transaction::abort()
-{
-	log.clear();
-}
-} /* namespace new_map */
-} /* namespace internal */
 
 new_map::new_map(std::unique_ptr<internal::config> cfg)
     : pmemobj_engine_base(cfg, "pmemkv_new_map"), config(std::move(cfg))
@@ -65,6 +19,9 @@ new_map::new_map(std::unique_ptr<internal::config> cfg)
 
 new_map::~new_map()
 {
+	std::unique_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
+	compaction_cv.wait(sh_lock, [&] { return immutable_map == nullptr; });
+
 	LOG("Stopped ok");
 }
 
@@ -77,96 +34,51 @@ status new_map::count_all(std::size_t &cnt)
 {
 	LOG("count_all");
 	check_outside_tx();
-	cnt = container->size();
 
-	return status::OK;
+	// XXX - this is very slow and not thread safe
+	cnt = 0;
+	return get_all(
+		[](const char *k, size_t kb, const char *v, size_t vb, void *arg) {
+			auto size = static_cast<size_t *>(arg);
+			(*size)++;
+
+			return PMEMKV_STATUS_OK;
+		},
+		&cnt);
 }
 
-template <typename It>
-static std::size_t size(It first, It last)
-{
-	auto dist = std::distance(first, last);
-	assert(dist >= 0);
+// template <typename Iterator, decltype(std::declval<Iterator>()->first) = {}>
+// static int key(const Iterator& it) {
+// 	return it->first;
+// }
 
-	return static_cast<std::size_t>(dist);
-}
+// template <typename Iterator, decltype(std::declval<Iterator>()->key()) = {}>
+// static int key(const Iterator& it) {
+// 	return it->key();
+// }
 
-status new_map::count_above(string_view key, std::size_t &cnt)
-{
-	LOG("count_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
+// template <typename Iterator, decltype(std::declval<Iterator>()->second) = {}>
+// static int value(const Iterator& it) {
+// 	return it->second;
+// }
 
-	auto first = container->upper_bound(key);
-	auto last = container->end();
+// template <typename Iterator, decltype(std::declval<Iterator>()->value()) = {}>
+// static int value(const Iterator& it) {
+// 	return it->value();
+// }
 
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_equal_above(string_view key, std::size_t &cnt)
-{
-	LOG("count_equal_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->lower_bound(key);
-	auto last = container->end();
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_equal_below(string_view key, std::size_t &cnt)
-{
-	LOG("count_equal_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->upper_bound(key);
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_below(string_view key, std::size_t &cnt)
-{
-	LOG("count_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->lower_bound(key);
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_between(string_view key1, string_view key2, std::size_t &cnt)
-{
-	LOG("count_between for key1=" << key1.data() << ", key2=" << key2.data());
-	check_outside_tx();
-
-	if (key1.compare(key2) < 0) {
-		auto first = container->upper_bound(key1);
-		auto last = container->lower_bound(key2);
-
-		cnt = size(first, last);
-	} else {
-		cnt = 0;
-	}
-
-	return status::OK;
-}
-
-status new_map::iterate(typename container_type::const_iterator first,
-		      typename container_type::const_iterator last,
+template <typename Iterator, typename Pred>
+static status iterate(Iterator first, Iterator last, Pred &&pred,
 		      get_kv_callback *callback, void *arg)
 {
 	for (auto it = first; it != last; ++it) {
-		string_view key = it->key();
-		string_view value = it->value();
+		// string_view key = key(it);
+		// string_view value = value(it);
+		string_view key = it->first;
+		string_view value = it->second;
+
+		if (!pred(key, value))
+			continue;
 
 		auto ret =
 			callback(key.data(), key.size(), value.data(), value.size(), arg);
@@ -181,109 +93,265 @@ status new_map::iterate(typename container_type::const_iterator first,
 status new_map::get_all(get_kv_callback *callback, void *arg)
 {
 	LOG("get_all");
+	std::atomic<bool> shutting_down;
 	check_outside_tx();
 
-	auto first = container->begin();
-	auto last = container->end();
+	std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-	return iterate(first, last, callback, arg);
-}
+	auto &imm = immutable_map;
+	auto &mut = mutable_map;
 
-status new_map::get_above(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
+	auto mut_pred = [](string_view, string_view v) {
+		return v != dram_map_type::tombstone;
+	};
 
-	auto first = container->upper_bound(key);
-	auto last = container->end();
+	auto imm_pred = [&](string_view k, string_view v) {
+		return !mut->exists(k) && mut_pred(k, v);
+	};
 
-	return iterate(first, last, callback, arg);
-}
+	auto pmem_pred = [&](string_view k, string_view v) {
+		return (!imm || !imm->exists(k)) && !mut->exists(k);
+	};
 
-status new_map::get_equal_above(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_equal_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
+	auto s = iterate(mut->begin(), mut->end(), mut_pred, callback, arg);
+	if (s != status::OK)
+		return s;
 
-	auto first = container->lower_bound(key);
-	auto last = container->end();
-
-	return iterate(first, last, callback, arg);
-}
-
-status new_map::get_equal_below(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_equal_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->upper_bound(key);
-
-	return iterate(first, last, callback, arg);
-}
-
-status new_map::get_below(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->lower_bound(key);
-
-	return iterate(first, last, callback, arg);
-}
-
-status new_map::get_between(string_view key1, string_view key2, get_kv_callback *callback,
-			  void *arg)
-{
-	LOG("get_between for key1=" << key1.data() << ", key2=" << key2.data());
-	check_outside_tx();
-
-	if (key1.compare(key2) < 0) {
-		auto first = container->upper_bound(key1);
-		auto last = container->lower_bound(key2);
-		return iterate(first, last, callback, arg);
+	if (imm) {
+		s = iterate(imm->begin(), imm->end(), imm_pred, callback, arg);
+		if (s != status::OK)
+			return s;
 	}
 
-	return status::OK;
+	return iterate(container->begin(), container->end(), pmem_pred, callback, arg);
 }
 
 status new_map::exists(string_view key)
 {
 	LOG("exists for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
 
-	return container->find(key) != container->end() ? status::OK : status::NOT_FOUND;
+	return get(
+		key, [](const char *, size_t, void *) {}, nullptr);
 }
 
 status new_map::get(string_view key, get_v_callback *callback, void *arg)
 {
 	LOG("get key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
 
-	auto it = container->find(key);
-	if (it != container->end()) {
-		auto value = string_view(it->value());
-		callback(value.data(), value.size(), arg);
-		return status::OK;
+	std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
+
+	auto &imm = immutable_map;
+	auto &mut = mutable_map;
+
+	// XXX: think about consistency guarantees with regard to lookups in several maps
+	// Maybe we could use sharding for dram also and then each key would have specific
+	// lock it would also decrease number of locks take (3 -> 1) if each dram shard
+	// corresponds with pmem shard - much simpler compaction THINK ABOUT SORTED
+	// DATASTRUCTURES!!!
+
+	{
+		dram_map_type::const_accessor_type acc;
+		auto s = mut->get(key, acc);
+		if (s == dram_map_type::element_status::alive) {
+			callback(acc->second.data(), acc->second.size(), arg);
+			return status::OK;
+		} else if (s == dram_map_type::element_status::removed) {
+			return status::NOT_FOUND;
+		}
 	}
 
-	LOG("  key not found");
-	return status::NOT_FOUND;
+	{
+		if (imm) {
+			dram_map_type::const_accessor_type acc;
+			auto s = imm->get(key, acc);
+			if (s == dram_map_type::element_status::alive) {
+				callback(acc->second.data(), acc->second.size(), arg);
+				return status::OK;
+			} else if (s == dram_map_type::element_status::removed) {
+				return status::NOT_FOUND;
+			}
+		}
+	}
+
+	// unique_lock_type lock(mtxs[shard(key)]);
+
+	// auto it = container->find(key);
+	// if (it != container->end()) {
+	// 	auto value = string_view(it->value());
+	// 	callback(value.data(), value.size(), arg);
+	// 	return status::OK;
+	// }
+
+	container_type::const_accessor result;
+	auto found = container->find(result, key);
+	if (!found) {
+		std::cout << mut->size() << " " << (imm ? imm->size() : 0) << std::endl;
+		return status::NOT_FOUND;
+	}
+
+	callback(result->second.c_str(), result->second.size(), arg);
+
+	return status::OK;
+}
+
+// void radix_compaction()
+// {
+// 	std::vector<std::vector<index_type::dram_map_type::value_type*>>
+// elements(SHARDS_NUM);
+
+// for (auto &e : *imm) {
+// 	elements[shard(e->first)].push_back(&e);
+//}
+
+// 			// // XXX - allocate radix nodes before taking locks (action API?)
+// 		// for (int i = 0; i < SHARDS_NUM; i++) {
+// 		// 	/// XXX: all shards must be saved as a single atomic action (since
+// we don't know the order)
+// 		// 	// use some intermidiate layer? (list of radix nodes?) - we can
+// treat this layer as L0 in LSM-tree probably
+
+// 		// 	unique_lock_type lock(mtxs[i]);
+// 		// 	obj::transaction::run(pmpool, [&]{
+// 		// 		for (const auto &e : elements[i]) {
+// 		// 			if (uintptr_t(e->second.data()) ==
+// dram_map_type::tombstone)
+// 		// 				(*container)[i].erase(e->first);
+// 		// 			else
+// 		// 				(*container)[i].insert_or_assign(e->first,
+// e->second);
+// 		// 		}
+// 		// 	});
+// 		// }
+// }
+
+// XXX: make sure imm is alive for this funcion duration
+std::thread new_map::start_bg_compaction()
+{
+	// XXX: create thread pool
+	return std::thread([&] {
+		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
+
+		assert(immutable_map != nullptr);
+
+		try {
+			pmem::obj::transaction::run(pmpool, [&] {
+				// XXX: should we ever shrink?
+				// if (log->size() < imm->size())
+				// log->resize(imm->size());
+				assert(insert_log->size() == 0);
+				assert(remove_log->size() == 0);
+
+				/* It's safe to use immutable_map ptr without locks since
+				 * no other thread can modify it until it's null. */
+
+				// XXX: use some heuristic to decrease the space for logs
+				// (e.g. size() / 2)
+				insert_log->reserve(immutable_map->size());
+				remove_log->reserve(immutable_map->size());
+
+				// #ifndef NDEBUG
+				// 				size_t elements = 0;
+				// #endif
+
+				for (const auto &e : *immutable_map) {
+					if (e.second == dram_map_type::tombstone) {
+						remove_log->emplace_back(e.first);
+					} else {
+						insert_log->emplace_back(e.first,
+									 e.second);
+					}
+
+					// 					in.insert(e.first);
+					// #ifndef NDEBUG
+					// 					elements++;
+					// #endif
+				}
+
+				// 				assert(elements ==
+				// immutable_map->size());
+			});
+
+			{
+
+				for (const auto &e : *insert_log) {
+					container->insert_or_assign(std::move(e.first),
+								    std::move(e.second));
+				}
+
+				for (const auto &e : *remove_log) {
+					container->erase(e);
+				}
+			}
+
+			pmem::obj::transaction::run(pmpool, [&] {
+				insert_log->clear();
+				remove_log->clear();
+			});
+
+			// XXX debug
+#ifndef NDEBUG
+			for (const auto &e : *immutable_map) {
+				if (e.second == dram_map_type::tombstone) {
+					assert(container->count(string_view(
+						       e.first.data(), e.first.size())) ==
+					       0);
+				} else
+					assert(container->count(string_view(
+						       e.first.data(), e.first.size())) ==
+					       1);
+			}
+#endif
+
+			{
+				std::unique_lock<std::shared_timed_mutex> lock(
+					compaction_mtx);
+				immutable_map = nullptr;
+			}
+
+			compaction_cv.notify_all(); // -> one?
+
+		} catch (std::exception &e) {
+			std::cout << e.what() << std::endl;
+		}
+	});
+}
+
+bool new_map::dram_has_space(std::unique_ptr<dram_map_type> &map)
+{
+	return map->size() < dram_capacity;
 }
 
 status new_map::put(string_view key, string_view value)
 {
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
-	check_outside_tx();
 
-	auto result = container->try_emplace(key, value);
+	do {
+		std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
-	if (result.second == false) {
-		pmem::obj::transaction::run(pmpool,
-					    [&] { result.first.assign_val(value); });
-	}
+		if (dram_has_space(mutable_map)) {
+			mutable_map->put(key, value);
+			return status::OK;
+		} else {
+			sh_lock.unlock();
+			std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+
+			compaction_cv.wait(lock,
+					   [&] { return immutable_map == nullptr; });
+
+			if (dram_has_space(mutable_map))
+				continue;
+
+			assert(immutable_map == nullptr);
+
+			immutable_map = std::move(mutable_map);
+			mutable_map = std::make_unique<dram_map_type>();
+
+			assert(immutable_map != nullptr);
+
+			start_bg_compaction().detach();
+		}
+	} while (true);
 
 	return status::OK;
 }
@@ -291,21 +359,10 @@ status new_map::put(string_view key, string_view value)
 status new_map::remove(string_view key)
 {
 	LOG("remove key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
 
-	auto it = container->find(key);
-
-	if (it == container->end())
-		return status::NOT_FOUND;
-
-	container->erase(it);
-
-	return status::OK;
-}
-
-internal::transaction *new_map::begin_tx()
-{
-	return new internal::new_map::transaction(pmpool, container);
+	// XXX: there is no Way to know if element was actually deleted in thread safe
+	// manner
+	return put(key, dram_map_type::tombstone);
 }
 
 void new_map::Recover()
@@ -315,6 +372,8 @@ void new_map::Recover()
 			pmemobj_direct(*root_oid));
 
 		container = &pmem_ptr->map;
+		insert_log = &pmem_ptr->insert_log;
+		remove_log = &pmem_ptr->remove_log;
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
@@ -323,198 +382,23 @@ void new_map::Recover()
 					.raw();
 			auto pmem_ptr = static_cast<internal::new_map::pmem_type *>(
 				pmemobj_direct(*root_oid));
+
 			container = &pmem_ptr->map;
+			insert_log = &pmem_ptr->insert_log;
+			remove_log = &pmem_ptr->remove_log;
+
+			// container->resize(SHARDS_NUM);
 		});
 	}
-}
 
-internal::iterator_base *new_map::new_iterator()
-{
-	return new new_map_iterator<false>{container};
-}
+	// mtxs = std::vector<mutex_type>(SHARDS_NUM);
 
-internal::iterator_base *new_map::new_const_iterator()
-{
-	return new new_map_iterator<true>{container};
-}
+	mutable_map = std::make_unique<dram_map_type>();
+	immutable_map = nullptr;
 
-new_map::new_map_iterator<true>::new_map_iterator(container_type *c)
-    : container(c), pop(pmem::obj::pool_by_vptr(c))
-{
-}
-
-new_map::new_map_iterator<false>::new_map_iterator(container_type *c)
-    : new_map::new_map_iterator<true>(c)
-{
-}
-
-status new_map::new_map_iterator<true>::seek(string_view key)
-{
-	init_seek();
-
-	it_ = container->find(key);
-	if (it_ != container->end())
-		return status::OK;
-
-	return status::NOT_FOUND;
-}
-
-status new_map::new_map_iterator<true>::seek_lower(string_view key)
-{
-	init_seek();
-
-	it_ = container->lower_bound(key);
-	if (it_ == container->begin()) {
-		it_ = container->end();
-		return status::NOT_FOUND;
-	}
-
-	--it_;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_lower_eq(string_view key)
-{
-	init_seek();
-
-	it_ = container->upper_bound(key);
-	if (it_ == container->begin()) {
-		it_ = container->end();
-		return status::NOT_FOUND;
-	}
-
-	--it_;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_higher(string_view key)
-{
-	init_seek();
-
-	it_ = container->upper_bound(key);
-	if (it_ == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_higher_eq(string_view key)
-{
-	init_seek();
-
-	it_ = container->lower_bound(key);
-	if (it_ == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_to_first()
-{
-	init_seek();
-
-	if (container->empty())
-		return status::NOT_FOUND;
-
-	it_ = container->begin();
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_to_last()
-{
-	init_seek();
-
-	if (container->empty())
-		return status::NOT_FOUND;
-
-	it_ = container->end();
-	--it_;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::is_next()
-{
-	auto tmp = it_;
-	if (tmp == container->end() || ++tmp == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::next()
-{
-	init_seek();
-
-	if (it_ == container->end() || ++it_ == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::prev()
-{
-	init_seek();
-
-	if (it_ == container->begin())
-		return status::NOT_FOUND;
-
-	--it_;
-
-	return status::OK;
-}
-
-result<string_view> new_map::new_map_iterator<true>::key()
-{
-	assert(it_ != container->end());
-
-	return {it_->key().cdata()};
-}
-
-result<pmem::obj::slice<const char *>> new_map::new_map_iterator<true>::read_range(size_t pos,
-									       size_t n)
-{
-	assert(it_ != container->end());
-
-	if (pos + n > it_->value().size() || pos + n < pos)
-		n = it_->value().size() - pos;
-
-	return {{it_->value().cdata() + pos, it_->value().cdata() + pos + n}};
-}
-
-result<pmem::obj::slice<char *>> new_map::new_map_iterator<false>::write_range(size_t pos,
-									   size_t n)
-{
-	assert(it_ != container->end());
-
-	if (pos + n > it_->value().size() || pos + n < pos)
-		n = it_->value().size() - pos;
-
-	log.push_back({std::string(it_->value().cdata() + pos, n), pos});
-	auto &val = log.back().first;
-
-	return {{&val[0], &val[n]}};
-}
-
-status new_map::new_map_iterator<false>::commit()
-{
-	pmem::obj::transaction::run(pop, [&] {
-		for (auto &p : log) {
-			auto dest = it_->value().range(p.second, p.first.size());
-			std::copy(p.first.begin(), p.first.end(), dest.begin());
-		}
-	});
-	log.clear();
-
-	return status::OK;
-}
-
-void new_map::new_map_iterator<false>::abort()
-{
-	log.clear();
+	auto dram_capacity = std::getenv("DRAM_CAPACITY");
+	if (dram_capacity)
+		this->dram_capacity = std::stoi(dram_capacity);
 }
 
 } // namespace kv

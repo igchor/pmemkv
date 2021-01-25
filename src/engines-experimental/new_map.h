@@ -6,6 +6,25 @@
 #include "../iterator.h"
 #include "../pmemobj_engine.h"
 
+#include <libpmemobj++/persistent_ptr.hpp>
+
+#include <libpmemobj++/experimental/inline_string.hpp>
+#include <libpmemobj++/experimental/radix_tree.hpp>
+
+#include <libpmemobj++/detail/pair.hpp>
+
+#include <libpmemobj++/container/string.hpp>
+
+#include <libpmemobj++/container/concurrent_hash_map.hpp>
+
+#include <tbb/concurrent_hash_map.h>
+
+#include <endian.h>
+
+#include <shared_mutex>
+
+#include <condition_variable>
+
 namespace pmem
 {
 namespace kv
@@ -15,7 +34,169 @@ namespace internal
 namespace new_map
 {
 
-// using map_type =
+class key_equal {
+public:
+	template <typename M, typename U>
+	bool operator()(const M &lhs, const U &rhs) const
+	{
+		return lhs == rhs;
+	}
+};
+
+class string_hasher {
+	/* hash multiplier used by fibonacci hashing */
+	static const size_t hash_multiplier = 11400714819323198485ULL;
+
+public:
+	using transparent_key_equal = key_equal;
+
+	size_t operator()(const obj::string &str) const
+	{
+		return hash(str.c_str(), str.size());
+	}
+
+	size_t operator()(string_view str) const
+	{
+		return hash(str.data(), str.size());
+	}
+
+private:
+	size_t hash(const char *str, size_t size) const
+	{
+		size_t h = 0;
+		for (size_t i = 0; i < size; ++i) {
+			h = static_cast<size_t>(str[i]) ^ (h * hash_multiplier);
+		}
+		return h;
+	}
+};
+
+using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
+
+// using pmem_map_type =
+// pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
+// 					    pmem::obj::experimental::inline_string>;
+
+using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
+using pmem_remove_log_type = obj::vector<obj::string>;
+
+struct dram_map_type {
+	// using container_type = tbb::concurrent_hash_map<string_view, string_view,
+	// string_hasher>;
+	using container_type = tbb::concurrent_hash_map<std::string, std::string>;
+	using accessor_type = container_type::accessor;
+	using const_accessor_type = container_type::const_accessor;
+	// static constexpr uintptr_t tombstone = std::numeric_limits<uintptr_t>::max();
+	static constexpr const char *tombstone = "tombstone"; // XXX
+
+	dram_map_type()
+	{
+		is_mutable = true;
+	}
+
+	~dram_map_type()
+	{
+		// for (const auto &e : map) {
+		// 	 delete[] e.first.data();
+
+		// 	 if ((uint64_t) e.second.data() != dram_map_type::tombstone)
+		// 	 	delete[] e.second.data();
+		//  }
+	}
+
+	void put(string_view key, string_view value)
+	{
+		container_type::accessor acc;
+
+		// auto k = new char[key.size()];
+		// std::copy(key.begin(), key.data() + key.size(), k);
+
+		// auto v = (char*) tombstone;
+
+		// if ((uint64_t)value.data() != tombstone) {
+		// 	v = new char[value.size()];
+		// 	std::copy(value.begin(), value.data() + value.size(), v);
+		// }
+
+		// container_type::value_type kv{string_view(k, key.size()),
+		// string_view(v, value.size())};
+		container_type::value_type kv{std::string(key.data(), key.size()),
+					      std::string(value.data(), value.size())};
+
+		// XXX - make it exception safe (use C++...)
+		auto inserted = map.insert(acc, kv);
+		if (!inserted) {
+			// if ((uintptr_t) acc->second.data() != tombstone)
+			// 	delete[] acc->second.data();
+			// delete[] kv.first.data();
+
+			acc->second = kv.second;
+		}
+	}
+
+	enum class element_status { alive, removed, not_found };
+
+	element_status get(string_view key, container_type::const_accessor &acc)
+	{
+		auto found = map.find(acc, std::string(key.data(), key.size()));
+
+		if (found) {
+			if (acc->second == tombstone)
+				return element_status::removed;
+			else
+				return element_status::alive;
+		}
+
+		return element_status::not_found;
+	}
+
+	/* Element exists in the dram map (alive or tombstone) */
+	bool exists(string_view key)
+	{
+		return map.count(std::string(key.data(), key.size())) == 0 ? false : true;
+	}
+
+	// void remove(string_view key) {
+	// 	container_type::accessor acc;
+
+	// 	// auto k = new char[key.size()];
+	// 	// std::copy(key.begin(), key.data() + key.size(), k);
+
+	// 	// container_type::value_type kv{string_view(k, key.size()),
+	// string_view((const char*)tombstone, 0)}; 	container_type::value_type
+	// kv{std::string(key.data(), key.size()), std::string((const char*) tombstone,
+	// 0)};
+
+	// 	// XXX - make it exception safe (use C++...)
+	// 	auto inserted = map.insert(acc, kv);
+	// 	if (!inserted) {
+	// 		// if ((uintptr_t) acc->second.data() != tombstone)
+	// 		// 	delete[] acc->second.data();
+	// 		// delete[] kv.first.data();
+
+	// 		acc->second = kv.second;
+	// 	}
+	// }
+
+	container_type::iterator begin()
+	{
+		return map.begin();
+	}
+
+	container_type::iterator end()
+	{
+		return map.end();
+	}
+
+	size_t size() const
+	{
+		return map.size();
+	}
+
+	std::atomic<bool> is_mutable;
+
+	container_type map;
+};
 
 struct pmem_type {
 	pmem_type() : map()
@@ -23,25 +204,14 @@ struct pmem_type {
 		std::memset(reserved, 0, sizeof(reserved));
 	}
 
-	map_type map;
+	// obj::vector<pmem_map_type> map;
+	pmem_map_type map;
+	pmem_insert_log_type insert_log;
+	pmem_remove_log_type remove_log;
 	uint64_t reserved[8];
 };
 
-static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
-
-class transaction : public ::pmem::kv::internal::transaction {
-public:
-	transaction(pmem::obj::pool_base &pop, map_type *container);
-	status put(string_view key, string_view value) final;
-	status remove(string_view key) final;
-	status commit() final;
-	void abort() final;
-
-private:
-	pmem::obj::pool_base &pop;
-	dram_log log;
-	map_type *container;
-};
+// static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
 } /* namespace new_map */
 } /* namespace internal */
@@ -54,27 +224,14 @@ public:
 	new_map(std::unique_ptr<internal::config> cfg);
 	~new_map();
 
-	new_map(const radix &) = delete;
+	new_map(const new_map &) = delete;
 	new_map &operator=(const new_map &) = delete;
 
 	std::string name() final;
 
 	status count_all(std::size_t &cnt) final;
-	status count_above(string_view key, std::size_t &cnt) final;
-	status count_equal_above(string_view key, std::size_t &cnt) final;
-	status count_equal_below(string_view key, std::size_t &cnt) final;
-	status count_below(string_view key, std::size_t &cnt) final;
-	status count_between(string_view key1, string_view key2, std::size_t &cnt) final;
 
 	status get_all(get_kv_callback *callback, void *arg) final;
-	status get_above(string_view key, get_kv_callback *callback, void *arg) final;
-	status get_equal_above(string_view key, get_kv_callback *callback,
-			       void *arg) final;
-	status get_equal_below(string_view key, get_kv_callback *callback,
-			       void *arg) final;
-	status get_below(string_view key, get_kv_callback *callback, void *arg) final;
-	status get_between(string_view key1, string_view key2, get_kv_callback *callback,
-			   void *arg) final;
 
 	status exists(string_view key) final;
 
@@ -84,67 +241,87 @@ public:
 
 	status remove(string_view key) final;
 
-	internal::transaction *begin_tx() final;
+	void flush() final
+	{
+		std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
 
-	internal::iterator_base *new_iterator() final;
-	internal::iterator_base *new_const_iterator() final;
+		compaction_cv.wait(lock, [&] { return immutable_map == nullptr; });
+
+		/* If we end up here, neither mutable nor immutable map
+		 * can be changed concurrently. The only allowed
+		 * concurrent change is setting immutable_map to nullptr
+		 * (by the compaction thread). */
+		immutable_map = std::move(mutable_map);
+		mutable_map = std::make_unique<dram_map_type>();
+
+		auto t = start_bg_compaction();
+		lock.unlock();
+		t.join();
+	}
 
 private:
-	using container_type = internal::radix::map_type;
+	// static constexpr int SHARDS_NUM = 1024;
+
+	// static inline uint64_t
+	// mix(uint64_t h)
+	// {
+	// 	h ^= h >> 23;
+	// 	h *= 0x2127599bf4325c37ULL;
+	// 	return h ^ h >> 47;
+	// }
+
+	// uint64_t shard(string_view key) {
+	// 	const uint64_t    m = 0x880355f21e6d1965ULL;
+	// 	const uint64_t *pos = (const uint64_t *)key.data();
+	// 	const uint64_t *end = pos + (key.size() / 8);
+	// 	uint64_t h = key.size() * m;
+
+	// 	while (pos != end)
+	// 		h = (h ^ mix(*pos++)) * m;
+
+	// 	if (key.size() & 7) {
+	// 		uint64_t shift = (key.size() & 7) * 8;
+	// 		uint64_t mask = (1ULL << shift) - 1;
+	// 		uint64_t v = htole64(*pos) & mask;
+	// 		h = (h ^ mix(v)) * m;
+	// 	}
+
+	// 	return mix(h) & (SHARDS_NUM - 1);
+	// }
+
+	/// using container_type = obj::vector<internal::new_map::pmem_map_type>;
+	using container_type = internal::new_map::pmem_map_type;
+	using dram_map_type = internal::new_map::dram_map_type;
+	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
+	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
+
+	std::thread start_bg_compaction();
+	bool dram_has_space(std::unique_ptr<dram_map_type> &map);
 
 	void Recover();
-	status iterate(typename container_type::const_iterator first,
-		       typename container_type::const_iterator last,
-		       get_kv_callback *callback, void *arg);
 
 	container_type *container;
+	pmem_insert_log_type *insert_log;
+	pmem_remove_log_type *remove_log;
 	std::unique_ptr<internal::config> config;
-};
 
-template <>
-class radix::iterator<true> : virtual public internal::iterator_base {
-	using container_type = radix::container_type;
+	using mutex_type = std::shared_timed_mutex;
+	using unique_lock_type = std::unique_lock<mutex_type>;
+	using shared_lock_type = std::shared_lock<mutex_type>;
 
-public:
-	radix_iterator(container_type *container);
+	// std::vector<mutex_type> mtxs;
 
-	status seek(string_view key) final;
-	status seek_lower(string_view key) final;
-	status seek_lower_eq(string_view key) final;
-	status seek_higher(string_view key) final;
-	status seek_higher_eq(string_view key) final;
+	// static constexpr uint64_t dram_capacity = 1024; /// XXX: parameterize this
 
-	status seek_to_first() final;
-	status seek_to_last() final;
+	uint64_t dram_capacity = 1024;
 
-	status is_next() final;
-	status next() final;
-	status prev() final;
+	std::unique_ptr<dram_map_type> mutable_map;
+	std::unique_ptr<dram_map_type> immutable_map;
 
-	result<string_view> key() final;
+	std::shared_timed_mutex compaction_mtx;
+	std::shared_timed_mutex iteration_mtx;
 
-	result<pmem::obj::slice<const char *>> read_range(size_t pos, size_t n) final;
-
-protected:
-	container_type *container;
-	container_type::iterator it_;
-	pmem::obj::pool_base pop;
-};
-
-template <>
-class radix::iterator<false> : public radix::iterator<true> {
-	using container_type = radix::container_type;
-
-public:
-	radix_iterator(container_type *container);
-
-	result<pmem::obj::slice<char *>> write_range(size_t pos, size_t n) final;
-
-	status commit() final;
-	void abort() final;
-
-private:
-	std::vector<std::pair<std::string, size_t>> log;
+	std::condition_variable_any compaction_cv;
 };
 
 } /* namespace kv */
