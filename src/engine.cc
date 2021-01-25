@@ -72,7 +72,7 @@ static constexpr const char *available_engines = "blackhole"
 #ifdef ENGINE_STREE
 						 ", stree"
 #endif
-ifdef ENGINE_NEW_MAP
+#ifdef ENGINE_NEW_MAP
 						 ", new_map"
 #endif
 	;
