@@ -26,6 +26,12 @@
 #include <unordered_set>
 #include "pgm_index.hpp"
 
+#include <libpmemobj++/container/vector.hpp>
+#include <libpmemobj++/make_persistent.hpp>
+#include <libpmemobj++/transaction.hpp>
+#include <libpmemobj++/pool.hpp>
+#include <libpmemobj++/persistent_ptr.hpp>
+
 namespace pgm {
 
 /**
@@ -37,12 +43,11 @@ namespace pgm {
  */
 template<typename K, typename V, typename PGMType = PGMIndex<K>, uint8_t MinIndexedLevel = 18>
 class DynamicPGMIndex {
+    public:
+
     class ItemA;
     class ItemB;
     class Iterator;
-
-    template<typename T, typename A=std::allocator<T>>
-    class DefaultInitAllocator;
 
     constexpr static uint8_t min_level = 6; ///< 2^min_level-1 is the size of the sorted buffer for new items.
     constexpr static uint8_t fully_allocated_levels = std::max(15, min_level + 1);
@@ -53,10 +58,15 @@ class DynamicPGMIndex {
     static_assert(2 * PGMType::epsilon_value < 1ul << MinIndexedLevel);
 
     using Item = std::conditional_t<std::is_pointer_v<V>, ItemA, ItemB>;
-    using Level = std::vector<Item, DefaultInitAllocator<Item>>;
+
+    static_assert(!std::is_pointer_v<V>, "V cannot be a pointer");
+
+    using Level = pmem::obj::vector<Item>;
+
+    private:
 
     uint8_t used_levels;       ///< Equal to 1 + last level whose size is greater than 0, or = min_level if no data.
-    std::vector<Level> levels; ///< (i-min_level)th element is the data array on the ith level.
+    pmem::obj::vector<Level> &levels; ///< (i-min_level)th element is the data array on the ith level.
     std::vector<PGMType> pgms; ///< (i-MinIndexedLevel)th element is the index on the ith level.
 
     const Level &level(uint8_t level) const { return levels[level - min_level]; }
@@ -97,12 +107,15 @@ class DynamicPGMIndex {
         auto actual_size = size_t(1) << (1 + min_level);
         assert((1ull << target) - level(target).size() >= actual_size);
 
-        Level tmp_a(size_hint);
-        Level tmp_b(size_hint + level(target).size());
+        auto tmp_b_ptr = pmem::obj::make_persistent<Level>(size_hint + level(target).size());
+        // XXX: check if it should be in DRAM also
+        
+        std::vector<Item> tmp_a(size_hint);
+        Level &tmp_b = *tmp_b_ptr;
 
         // Insert new_item in sorted order in the first level
-        const auto tmp1 = tmp_a.begin();
-        const auto tmp2 = tmp_b.begin();
+        const auto tmp1 = tmp_a.data();
+        const auto tmp2 = tmp_b.data();
         const auto mod = (up_to_level - min_level) % 2;
 
         auto it = std::move(levels[0].begin(), insertion_point, mod ? tmp1 : tmp2);
@@ -141,6 +154,9 @@ class DynamicPGMIndex {
         // Rebuild index, if needed
         if (target >= MinIndexedLevel)
             pgm(target) = PGMType(level(target).begin(), level(target).end());
+
+
+        pmem::obj::delete_persistent<Level>(tmp_b_ptr);
     }
 
     void insert(const Item &new_item) {
@@ -186,12 +202,30 @@ public:
     using iterator = Iterator;
 
     /**
-     * Constructs an empty container.
+     * Constructs container from levels table.
      */
-    DynamicPGMIndex() : used_levels(min_level), levels(32 - min_level), pgms() {
-        level(min_level).reserve(buffer_max_size);
-        for (uint8_t i = min_level + 1; i < fully_allocated_levels; ++i)
-            level(i).reserve(1ull << i);
+    DynamicPGMIndex(pmem::obj::vector<Level> &levels_ref, uint64_t size) : used_levels(min_level), levels(levels_ref), pgms() {
+        if (size == 0) {
+            levels.resize(32 - min_level);
+            level(min_level).reserve(buffer_max_size);
+            for (uint8_t i = min_level + 1; i < fully_allocated_levels; ++i)
+                level(i).reserve(1ull << i);
+        } else {
+            size_t n = size;
+            used_levels = std::max<uint8_t>(ceil_log2(n), min_level) + 1;
+
+             if (n == 0) {
+                used_levels = min_level;
+                return;
+            }
+
+            auto &target = level(used_levels - 1);
+
+            if (used_levels - 1 >= MinIndexedLevel) {
+                pgms = decltype(pgms)(used_levels - MinIndexedLevel);
+                pgm(used_levels - 1) = PGMType(target.begin(), target.end());
+            }
+        }
     }
 
     /**
@@ -199,39 +233,39 @@ public:
      * @tparam Iterator
      * @param first, last the range containing the sorted elements to be indexed
      */
-    template<typename Iterator>
-    DynamicPGMIndex(Iterator first, Iterator last) {
-        size_t n = std::distance(first, last);
-        used_levels = std::max<uint8_t>(ceil_log2(n), min_level) + 1;
-        levels = decltype(levels)(std::max<uint8_t>(used_levels, 32) - min_level + 1);
+    // template<typename Iterator>
+    // DynamicPGMIndex(Iterator first, Iterator last) {
+    //     size_t n = std::distance(first, last);
+    //     used_levels = std::max<uint8_t>(ceil_log2(n), min_level) + 1;
+    //     levels = decltype(levels)(std::max<uint8_t>(used_levels, 32) - min_level + 1);
 
-        level(min_level).reserve(buffer_max_size);
-        for (uint8_t i = min_level + 1; i < fully_allocated_levels; ++i)
-            level(i).reserve(1ull << i);
+    //     level(min_level).reserve(buffer_max_size);
+    //     for (uint8_t i = min_level + 1; i < fully_allocated_levels; ++i)
+    //         level(i).reserve(1ull << i);
 
-        if (n == 0) {
-            used_levels = min_level;
-            return;
-        }
+    //     if (n == 0) {
+    //         used_levels = min_level;
+    //         return;
+    //     }
 
-        // Copy only the first of each group of pairs with same key value
-        auto &target = level(used_levels - 1);
-        target.resize(n);
-        auto out = target.begin();
-        *out++ = Item(first->first, first->second);
-        while (++first != last) {
-            if (first->first < std::prev(out)->first)
-                throw std::invalid_argument("Range is not sorted");
-            if (first->first != std::prev(out)->first)
-                *out++ = Item(first->first, first->second);
-        }
-        target.resize(std::distance(target.begin(), out));
+    //     // Copy only the first of each group of pairs with same key value
+    //     auto &target = level(used_levels - 1);
+    //     target.resize(n);
+    //     auto out = target.begin();
+    //     *out++ = Item(first->first, first->second);
+    //     while (++first != last) {
+    //         if (first->first < std::prev(out)->first)
+    //             throw std::invalid_argument("Range is not sorted");
+    //         if (first->first != std::prev(out)->first)
+    //             *out++ = Item(first->first, first->second);
+    //     }
+    //     target.resize(std::distance(target.begin(), out));
 
-        if (used_levels - 1 >= MinIndexedLevel) {
-            pgms = decltype(pgms)(used_levels - MinIndexedLevel);
-            pgm(used_levels - 1) = PGMType(target.begin(), target.end());
-        }
-    }
+    //     if (used_levels - 1 >= MinIndexedLevel) {
+    //         pgms = decltype(pgms)(used_levels - MinIndexedLevel);
+    //         pgm(used_levels - 1) = PGMType(target.begin(), target.end());
+    //     }
+    // }
 
     /**
      * Inserts an element into the container if @p key does not exists in the container. If @p key already exists, the
@@ -369,30 +403,6 @@ public:
     }
 
 private:
-
-    // from: https://stackoverflow.com/a/21028912
-    template<typename T, typename A>
-    class DefaultInitAllocator : public std::allocator<T> {
-        typedef std::allocator_traits<A> a_t;
-
-    public:
-        template<typename U>
-        struct rebind {
-            using other = DefaultInitAllocator<U, typename a_t::template rebind_alloc<U> >;
-        };
-
-        using A::A;
-
-        template<typename U>
-        void construct(U *ptr) noexcept(std::is_nothrow_default_constructible_v<U>) {
-            ::new(static_cast<void *>(ptr)) U;
-        }
-
-        template<typename U, typename...Args>
-        void construct(U *ptr, Args &&... args) {
-            a_t::construct(static_cast<A &>(*this), ptr, std::forward<Args>(args)...);
-        }
-    };
 };
 
 namespace internal {
@@ -614,6 +624,7 @@ public:
 
 template<typename K, typename V, typename PGMType, uint8_t MinIndexedLevel>
 class DynamicPGMIndex<K, V, PGMType, MinIndexedLevel>::ItemA {
+public:
     friend class DynamicPGMIndex;
     static V tombstone;
 
@@ -635,6 +646,7 @@ V DynamicPGMIndex<K, V, PGMType, MinIndexedLevel>::ItemA::tombstone = new std::r
 
 template<typename K, typename V, typename PGMType, uint8_t MinIndexedLevel>
 class DynamicPGMIndex<K, V, PGMType, MinIndexedLevel>::ItemB {
+public:
     friend class DynamicPGMIndex;
     bool flag;
 

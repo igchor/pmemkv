@@ -1654,3 +1654,26 @@ if(ENGINE_RADIX)
 	endif()
 endif(ENGINE_RADIX)
 ################################################################################
+
+add_engine_test(ENGINE new_map
+BINARY pmemobj_error_handling_create
+TRACERS none memcheck
+SCRIPT pmemobj_based/pmemobj/error_handling_create.cmake)
+
+add_engine_test(ENGINE new_map
+BINARY pmemobj_put_get_std_map_oid
+TRACERS none memcheck pmemcheck
+SCRIPT pmemobj_based/pmemobj/put_get_std_map_oid.cmake
+PARAMS 1000 8 8)
+
+add_engine_test(ENGINE new_map
+BINARY put_get_std_map
+TRACERS none memcheck pmemcheck
+SCRIPT pmemobj_based/default.cmake
+PARAMS 1000 8 8)
+
+add_engine_test(ENGINE new_map
+		BINARY persistent_put_get_std_map_multiple_reopen
+		TRACERS none memcheck pmemcheck
+		SCRIPT pmemobj_based/default.cmake
+		PARAMS 1000 8 8)
