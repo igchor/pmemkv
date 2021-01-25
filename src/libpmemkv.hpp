@@ -564,6 +564,11 @@ public:
 	status remove(string_view key) noexcept;
 	status defrag(double start_percent = 0, double amount_percent = 100);
 
+	void flush()
+	{
+		pmemkv_flush(db_.get());
+	}
+
 	result<tx> tx_begin() noexcept;
 
 	result<read_iterator> new_read_iterator();

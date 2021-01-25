@@ -58,6 +58,7 @@ LIBPMEMKV_1.0 {
 		pmemkv_iterator_seek_lower_eq;
 		pmemkv_iterator_seek_to_first;
 		pmemkv_iterator_seek_to_last;
+		pmemkv_flush;
 		pmemkv_open;
 		pmemkv_put;
 		pmemkv_remove;
