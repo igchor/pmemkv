@@ -101,8 +101,12 @@ struct dram_map_type {
 		auto k = new char[key.size()];
 		std::copy(key.begin(), key.data() + key.size(), k);
 
-		auto v = new char[value.size()];
-		std::copy(value.begin(), value.data() + value.size(), v);
+		auto v = (char*) tombstone;
+		
+		if ((uint64_t)value.data() != tombstone) {
+			v = new char[value.size()];
+			std::copy(value.begin(), value.data() + value.size(), v);
+		}
 
 		container_type::value_type kv{string_view(k, key.size()), string_view(v, value.size())};
 

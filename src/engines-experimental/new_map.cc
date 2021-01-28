@@ -92,12 +92,20 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 	LOG("get_all");	std::atomic<bool> shutting_down;
 	check_outside_tx();
 
+	restart:
+
 	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
 	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
 
+	// if (mut == imm)
+	// imm = nullptr;
+
 	// XXX: can this happen? probably yes
-	if (mut == imm)
-		imm = nullptr;
+	auto imm2 = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
+	auto mut2 = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+
+	if (mut != mut2 || imm != imm2)
+		goto restart;
 
 	auto mut_pred = [](string_view, string_view v) {
 		return (uintptr_t)v.data() != dram_map_type::tombstone;
@@ -146,12 +154,17 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 {
 	LOG("get key=" << std::string(key.data(), key.size()));
 	
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+	restart:
+
 	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
+	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
 
 	// XXX: can this happen? probably yes
-	if (mut == imm)
-		imm = nullptr;
+	auto imm2 = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
+	auto mut2 = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+
+	if (mut != mut2 || imm != imm2)
+		goto restart;
 
 	// XXX: think about consistency guarantees with regard to lookups in several maps
 	// Maybe we could use sharding for dram also and then each key would have specific lock
@@ -194,8 +207,10 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 
 	container_type::const_accessor result;
 	auto found = container->find(result, key);
-	if (!found)
+	if (!found) {
+		std::cout << mut->size() << " " << (imm ? imm->size() : 0) << std::endl;
 		return status::NOT_FOUND;
+	}
 
 	callback(result->second.c_str(), result->second.size(), arg);
 
@@ -308,6 +323,9 @@ status new_map::put(string_view key, string_view value)
 			} else {
 				// mut->is_mutable.store(false), std::memory_order_release;
 
+				/* If we end up here, neither mutable nor immutable map can be changed concurrently.
+				 * The only allowed concurrent change is setting immutable_map to nullptr
+				 * (by the compaction thread). */
 				std::atomic_store_explicit(&immutable_map, mut, std::memory_order_release);
 				std::atomic_store_explicit(&mutable_map, std::make_shared<dram_map_type>(), std::memory_order_release);
 
@@ -329,24 +347,28 @@ status new_map::put(string_view key, string_view value)
 	if (mut != std::atomic_load_explicit(&mutable_map, std::memory_order_acquire))
 		goto restart;
 
+	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
+	if (mut == imm)
+		goto restart;
+
+	// XXX???? - problem - other thread could have started the map freezing (just got into else path in the looop).
+	// In the same time, this thread inserts data to the mut map. This way, this new value might not be visible?
+	if (mut->size() >= dram_capacity)
+		goto restart;
+
 	return status::OK;
 }
 
 status new_map::remove(string_view key)
 {
 	LOG("remove key=" << std::string(key.data(), key.size()));
+///auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+	//mut->remove(key);
 
-	restart:
+	//return status::OK;
 
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
-
-	mut->remove(key);
-
-	if (mut != std::atomic_load_explicit(&mutable_map, std::memory_order_acquire))
-		goto restart;
-
-	// XXX: there is not need to have this information thread-safe
-	return status::OK;
+	// XXX: there is no Way to know if element was actually deleted in thread safe manner
+	return put(key, string_view((const char*)dram_map_type::tombstone, 0));
 }
 
 void new_map::Recover()
