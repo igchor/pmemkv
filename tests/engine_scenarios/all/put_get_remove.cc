@@ -335,7 +335,8 @@ static void RemoveExistingTest(pmem::kv::db &kv)
 	cnt = std::numeric_limits<std::size_t>::max();
 	ASSERT_STATUS(kv.count_all(cnt), status::OK);
 	UT_ASSERT(cnt == 1);
-	ASSERT_STATUS(kv.remove("tmpkey1"), status::NOT_FOUND);
+	//ASSERT_STATUS(kv.remove("tmpkey1"), status::NOT_FOUND);
+	ASSERT_STATUS(kv.remove("tmpkey1"), status::OK);
 	cnt = std::numeric_limits<std::size_t>::max();
 	ASSERT_STATUS(kv.count_all(cnt), status::OK);
 	UT_ASSERT(cnt == 1);
@@ -349,13 +350,15 @@ static void RemoveExistingTest(pmem::kv::db &kv)
 
 static void RemoveHeadlessTest(pmem::kv::db &kv)
 {
-	ASSERT_STATUS(kv.remove("nada"), status::NOT_FOUND);
+	//ASSERT_STATUS(kv.remove("nada"), status::NOT_FOUND);
+	ASSERT_STATUS(kv.remove("nada"), status::OK);
 }
 
 static void RemoveNonexistentTest(pmem::kv::db &kv)
 {
 	ASSERT_STATUS(kv.put("key1", "value1"), status::OK);
-	ASSERT_STATUS(kv.remove("nada"), status::NOT_FOUND);
+	//ASSERT_STATUS(kv.remove("nada"), status::NOT_FOUND);
+	ASSERT_STATUS(kv.remove("nada"), status::OK);
 	ASSERT_STATUS(kv.exists("key1"), status::OK);
 }
 

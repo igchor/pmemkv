@@ -1655,6 +1655,9 @@ if(ENGINE_RADIX)
 endif(ENGINE_RADIX)
 ################################################################################
 if (ENGINE_NEW_MAP)
+
+# XXX - add test with small and big dram buffer size
+
 add_engine_test(ENGINE new_map
 			BINARY c_api_null_db_config
 			TRACERS none memcheck
@@ -1708,25 +1711,25 @@ add_engine_test(ENGINE new_map
 
 	add_engine_test(ENGINE new_map
 			BINARY concurrent_put_get_remove_params
-			TRACERS none memcheck # XXX - tbb lock does not work well with drd or helgrind
+			TRACERS none memcheck drd helgrind
 			SCRIPT pmemobj_based/default.cmake
 			PARAMS 8 50)
 
 	add_engine_test(ENGINE new_map
 			BINARY concurrent_put_get_remove_gen_params
-			TRACERS none memcheck # XXX - tbb lock does not work well with drd or helgrind
+			TRACERS none memcheck drd helgrind
 			SCRIPT pmemobj_based/default.cmake
 			PARAMS 8 50 100)
 
 	add_engine_test(ENGINE new_map
 			BINARY concurrent_put_get_remove_single_op_params
-			TRACERS none # XXX - tbb lock does not work well with drd or helgrind
+			TRACERS none drd helgrind
 			SCRIPT pmemobj_based/default.cmake
 			DB_SIZE "MIN_JEMALLOC_ARENA_SIZE" PARAMS 1000)
 
 	add_engine_test(ENGINE new_map
 			BINARY concurrent_put_get_remove_single_op_params
-			TRACERS memcheck # XXX - tbb lock does not work well with drd or helgrind
+			TRACERS memcheck drd helgrind
 			SCRIPT pmemobj_based/default.cmake
 			DB_SIZE "MIN_JEMALLOC_ARENA_SIZE" PARAMS 400)
 

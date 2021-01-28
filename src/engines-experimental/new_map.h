@@ -82,6 +82,10 @@ struct dram_map_type {
 	using const_accessor_type = container_type::const_accessor;
 	static constexpr uintptr_t tombstone = std::numeric_limits<uintptr_t>::max();
 
+	dram_map_type() {
+		is_mutable = true;
+	}
+
 	~dram_map_type() {
 		for (const auto &e : map) {
 			 delete[] e.first.data();
@@ -168,6 +172,8 @@ struct dram_map_type {
 		return map.size();
 	}
 
+	std::atomic<bool> is_mutable;
+
 	tbb::concurrent_hash_map<string_view, string_view> map;
 };
 
@@ -216,7 +222,7 @@ public:
 
 private:
 
-	static constexpr int SHARDS_NUM = 1024;
+	// static constexpr int SHARDS_NUM = 1024;
 
 	// static inline uint64_t
 	// mix(uint64_t h)
@@ -268,7 +274,9 @@ private:
 
 	// std::vector<mutex_type> mtxs;
 
-	static constexpr uint64_t dram_capacity = 1024; /// XXX: parameterize this
+	//static constexpr uint64_t dram_capacity = 1024; /// XXX: parameterize this
+
+	uint64_t dram_capacity = 1024;
 
 	std::shared_ptr<dram_map_type> mutable_map;
 	std::shared_ptr<dram_map_type> immutable_map;

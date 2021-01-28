@@ -149,6 +149,10 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
 	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
 
+	// XXX: can this happen? probably yes
+	if (mut == imm)
+		imm = nullptr;
+
 	// XXX: think about consistency guarantees with regard to lookups in several maps
 	// Maybe we could use sharding for dram also and then each key would have specific lock
 	// it would also decrease number of locks take (3 -> 1)
@@ -275,13 +279,15 @@ void new_map::start_bg_compaction(std::shared_ptr<dram_map_type> imm)
 
 bool new_map::dram_has_space(std::shared_ptr<dram_map_type> map)
 {
-	return map->size() < 1024; // XXX - parameterize
+	return map->size() < dram_capacity;
 }
 
 status new_map::put(string_view key, string_view value)
 {
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
+
+	restart:
 
 	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
 
@@ -300,7 +306,9 @@ status new_map::put(string_view key, string_view value)
 				//abort();
 				continue;
 			} else {
-				std::atomic_store_explicit(&immutable_map, mutable_map, std::memory_order_release);
+				// mut->is_mutable.store(false), std::memory_order_release;
+
+				std::atomic_store_explicit(&immutable_map, mut, std::memory_order_release);
 				std::atomic_store_explicit(&mutable_map, std::make_shared<dram_map_type>(), std::memory_order_release);
 
 				start_bg_compaction(mut);
@@ -311,7 +319,15 @@ status new_map::put(string_view key, string_view value)
 	// once we reach this point, there might be no space in the dram again...
 	// but if buffer is of reasonable size this should not be a problem (we will exceed the capacity by a small value)
 	// we could have custom allocation wrapper - throw exception on eom and restart
+
+	// XXX - this put might go to IMMUTABLE map (other thread could have just make this map as immutable)
+	// how to solve that for really immutable map? 
 	mut->put(key, value);
+
+	// XXX - is this correct? test this
+	// The idea is to insert the element again to make sure it was not overlooked in the immutable map (we could have inserted it after immutable map was compacted)
+	if (mut != std::atomic_load_explicit(&mutable_map, std::memory_order_acquire))
+		goto restart;
 
 	return status::OK;
 }
@@ -320,15 +336,17 @@ status new_map::remove(string_view key)
 {
 	LOG("remove key=" << std::string(key.data(), key.size()));
 
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+	restart:
 
-	auto found = exists(key);
+	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
 
 	mut->remove(key);
 
-	/* XXX: Should we just always succeed? checking if the element was actually removed could be expensive */
-	// Currently, this is not thread safe
-	return found;
+	if (mut != std::atomic_load_explicit(&mutable_map, std::memory_order_acquire))
+		goto restart;
+
+	// XXX: there is not need to have this information thread-safe
+	return status::OK;
 }
 
 void new_map::Recover()
@@ -361,6 +379,10 @@ void new_map::Recover()
 
 	mutable_map = std::make_shared<dram_map_type>();
 	immutable_map = nullptr;
+
+	auto dram_capacity = std::getenv("DRAM_CAPACITY");
+	if (dram_capacity)
+		this->dram_capacity = std::stoi(dram_capacity);
 }
 
 } // namespace kv
