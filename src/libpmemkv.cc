@@ -512,6 +512,11 @@ int pmemkv_get_equal_above(pmemkv_db *db, const char *k, size_t kb,
 	});
 }
 
+void pmemkv_flush(pmemkv_db *db)
+{
+	return db_to_internal(db)->flush();
+}
+
 int pmemkv_get_equal_below(pmemkv_db *db, const char *k, size_t kb,
 			   pmemkv_get_kv_callback *c, void *arg)
 {

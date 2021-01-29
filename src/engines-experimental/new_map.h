@@ -21,6 +21,10 @@
 
 #include <endian.h>
 
+#include <shared_mutex>
+
+#include <condition_variable>
+
 namespace pmem
 {
 namespace kv
@@ -77,45 +81,48 @@ using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>
 using pmem_remove_log_type = obj::vector<obj::string>;
 
 struct dram_map_type {
-	using container_type = tbb::concurrent_hash_map<string_view, string_view>;
+	//using container_type = tbb::concurrent_hash_map<string_view, string_view, string_hasher>;
+	using container_type = tbb::concurrent_hash_map<std::string, std::string>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
-	static constexpr uintptr_t tombstone = std::numeric_limits<uintptr_t>::max();
+	//static constexpr uintptr_t tombstone = std::numeric_limits<uintptr_t>::max();
+	static constexpr const char* tombstone = "tombstone"; // XXX
 
 	dram_map_type() {
 		is_mutable = true;
 	}
 
 	~dram_map_type() {
-		for (const auto &e : map) {
-			 delete[] e.first.data();
+		// for (const auto &e : map) {
+		// 	 delete[] e.first.data();
 
-			 if ((uint64_t) e.second.data() != dram_map_type::tombstone)
-			 	delete[] e.second.data();
-		 }
+		// 	 if ((uint64_t) e.second.data() != dram_map_type::tombstone)
+		// 	 	delete[] e.second.data();
+		//  }
 	}
 
 	void put(string_view key, string_view value) {
 		container_type::accessor acc;
 
-		auto k = new char[key.size()];
-		std::copy(key.begin(), key.data() + key.size(), k);
+		// auto k = new char[key.size()];
+		// std::copy(key.begin(), key.data() + key.size(), k);
 
-		auto v = (char*) tombstone;
+		// auto v = (char*) tombstone;
 		
-		if ((uint64_t)value.data() != tombstone) {
-			v = new char[value.size()];
-			std::copy(value.begin(), value.data() + value.size(), v);
-		}
+		// if ((uint64_t)value.data() != tombstone) {
+		// 	v = new char[value.size()];
+		// 	std::copy(value.begin(), value.data() + value.size(), v);
+		// }
 
-		container_type::value_type kv{string_view(k, key.size()), string_view(v, value.size())};
+		//container_type::value_type kv{string_view(k, key.size()), string_view(v, value.size())};
+		container_type::value_type kv{std::string(key.data(), key.size()), std::string(value.data(), value.size())};
 
 		// XXX - make it exception safe (use C++...)
 		auto inserted = map.insert(acc, kv);
 		if (!inserted) {
-			if ((uintptr_t) acc->second.data() != tombstone)
-				delete[] acc->second.data();
-			delete[] kv.first.data();
+			// if ((uintptr_t) acc->second.data() != tombstone)
+			// 	delete[] acc->second.data();
+			// delete[] kv.first.data();
 
 			acc->second = kv.second;
 		}
@@ -124,10 +131,10 @@ struct dram_map_type {
 	enum class element_status {alive, removed, not_found};
 
 	element_status get(string_view key, container_type::const_accessor& acc) {
-		auto found = map.find(acc, key);
+		auto found = map.find(acc, std::string(key.data(), key.size()));
 
 		if (found) {
-		 	if ((uintptr_t)acc->second.data() == tombstone)
+		 	if (acc->second == tombstone)
 				return element_status::removed;
 			else
 				return element_status::alive;
@@ -139,27 +146,28 @@ struct dram_map_type {
 	/* Element exists in the dram map (alive or tombstone) */
 	bool exists(string_view key)
 	{
-		return map.count(key) == 0 ? false : true;
+		return map.count(std::string(key.data(), key.size())) == 0 ? false : true;
 	}
 
-	void remove(string_view key) {
-		container_type::accessor acc;
+	// void remove(string_view key) {
+	// 	container_type::accessor acc;
 
-		auto k = new char[key.size()];
-		std::copy(key.begin(), key.data() + key.size(), k);
+	// 	// auto k = new char[key.size()];
+	// 	// std::copy(key.begin(), key.data() + key.size(), k);
 
-		container_type::value_type kv{string_view(k, key.size()), string_view((const char*)tombstone, 0)};
+	// 	// container_type::value_type kv{string_view(k, key.size()), string_view((const char*)tombstone, 0)};
+	// 	container_type::value_type kv{std::string(key.data(), key.size()), std::string((const char*) tombstone, 0)};
 
-		// XXX - make it exception safe (use C++...)
-		auto inserted = map.insert(acc, kv);
-		if (!inserted) {
-			if ((uintptr_t) acc->second.data() != tombstone)
-				delete[] acc->second.data();
-			delete[] kv.first.data();
+	// 	// XXX - make it exception safe (use C++...)
+	// 	auto inserted = map.insert(acc, kv);
+	// 	if (!inserted) {
+	// 		// if ((uintptr_t) acc->second.data() != tombstone)
+	// 		// 	delete[] acc->second.data();
+	// 		// delete[] kv.first.data();
 
-			acc->second = kv.second;
-		}
-	}
+	// 		acc->second = kv.second;
+	// 	}
+	// }
 
 	container_type::iterator begin()
 	{
@@ -178,7 +186,7 @@ struct dram_map_type {
 
 	std::atomic<bool> is_mutable;
 
-	tbb::concurrent_hash_map<string_view, string_view> map;
+	container_type map;
 };
 
 struct pmem_type {
@@ -224,6 +232,30 @@ public:
 
 	status remove(string_view key) final;
 
+	void flush() final {
+		do {
+			std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+
+			if (immutable_map) {
+				// XXX: wait on cond var
+				continue;
+			} else {
+				/* If we end up here, neither mutable nor immutable map can be changed concurrently.
+				 * The only allowed concurrent change is setting immutable_map to nullptr
+				 * (by the compaction thread). */
+				immutable_map = std::move(mutable_map);
+				mutable_map = std::make_unique<dram_map_type>();
+
+				auto t = start_bg_compaction();
+				lock.unlock();
+				t.join();
+
+				return;
+			}
+		} while (true);
+	}
+
+
 private:
 
 	// static constexpr int SHARDS_NUM = 1024;
@@ -262,8 +294,8 @@ private:
 	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
 	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
 
-	void start_bg_compaction(std::shared_ptr<dram_map_type> imm);
-	bool dram_has_space(std::shared_ptr<dram_map_type> map);
+	std::thread start_bg_compaction();
+	bool dram_has_space(std::unique_ptr<dram_map_type> &map);
 
 	void Recover();
 
@@ -282,14 +314,13 @@ private:
 
 	uint64_t dram_capacity = 1024;
 
-	std::shared_ptr<dram_map_type> mutable_map;
-	std::shared_ptr<dram_map_type> immutable_map;
+	std::unique_ptr<dram_map_type> mutable_map;
+	std::unique_ptr<dram_map_type> immutable_map;
 
-	std::mutex compaction_mtx;
-
+	std::shared_timed_mutex compaction_mtx;
 	std::shared_timed_mutex iteration_mtx;
 
-	std::shared_timed_mutex it_mtx;
+	std::condition_variable_any compaction_cv;
 };
 
 } /* namespace kv */

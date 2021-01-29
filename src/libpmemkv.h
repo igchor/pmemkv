@@ -107,6 +107,8 @@ int pmemkv_remove(pmemkv_db *db, const char *k, size_t kb);
 
 int pmemkv_defrag(pmemkv_db *db, double start_percent, double amount_percent);
 
+void pmemkv_flush(pmemkv_db *db);
+
 const char *pmemkv_errormsg(void);
 
 /* This API is EXPERIMENTAL and might change. */

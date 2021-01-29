@@ -4,6 +4,7 @@
 #include "new_map.h"
 #include "../out.h"
 
+#include <set>
 namespace pmem
 {
 namespace kv
@@ -18,8 +19,10 @@ new_map::new_map(std::unique_ptr<internal::config> cfg)
 
 new_map::~new_map()
 {
-	while (std::atomic_load_explicit(&immutable_map, std::memory_order_acquire) != nullptr) {
-		// XXX: wait on cond var
+	while (true) {
+		std::unique_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
+		if (immutable_map == nullptr)
+			break;
 	}
 
 	LOG("Stopped ok");
@@ -65,6 +68,9 @@ status new_map::count_all(std::size_t &cnt)
 // 	return it->value();
 // }
 
+static int map = 0;
+static std::string x;
+
 template <typename Iterator, typename Pred>
 static status iterate(Iterator first, Iterator last, Pred &&pred, get_kv_callback *callback, void *arg)
 {
@@ -76,6 +82,11 @@ static status iterate(Iterator first, Iterator last, Pred &&pred, get_kv_callbac
 
 		if (!pred(key, value))
 			continue;
+
+		if (key[0] != 'i') {
+			std::cout << key.data() << " " << map << std::endl;
+			x.assign(key.data(), key.size());
+		}
 
 		auto ret =
 			callback(key.data(), key.size(), value.data(), value.size(), arg);
@@ -92,25 +103,13 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 	LOG("get_all");	std::atomic<bool> shutting_down;
 	check_outside_tx();
 
-		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
+	std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-	restart:
-
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
-	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-
-	// if (mut == imm)
-	// imm = nullptr;
-
-	// XXX: can this happen? probably yes
-	auto imm2 = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-	auto mut2 = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
-
-	if (mut != mut2 || imm != imm2)
-		goto restart;
+	auto &imm = immutable_map;
+	auto &mut = mutable_map;
 
 	auto mut_pred = [](string_view, string_view v) {
-		return (uintptr_t)v.data() != dram_map_type::tombstone;
+		return v != dram_map_type::tombstone;
 	};
 
 	auto imm_pred = [&](string_view k, string_view v) {
@@ -121,26 +120,17 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 		return (!imm || !imm->exists(k)) && !mut->exists(k);
 	};
 
+	map = 0;
 	auto s = iterate(mut->begin(), mut->end(), mut_pred, callback, arg);
 	if (s != status::OK)
 		return s;
 
 	if (imm) {
+		map = 1;
 		s = iterate(imm->begin(), imm->end(), imm_pred, callback, arg);
 		if (s != status::OK)
 			return s;
 	}
-
-	// for (auto &c : *container) {
-	// 	s = iterate(c.cbegin(), c.cend(), pmem_pred, callback, arg);
-	// 	if (s != status::OK)
-	// 		return s;
-	// }
-
-	// return s;
-
-		// XXX: should it be above?
-	//std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
 	return iterate(container->begin(), container->end(), pmem_pred, callback, arg);
 }
@@ -155,18 +145,11 @@ status new_map::exists(string_view key)
 status new_map::get(string_view key, get_v_callback *callback, void *arg)
 {
 	LOG("get key=" << std::string(key.data(), key.size()));
-	
-	restart:
 
-	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+	std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
-	// XXX: can this happen? probably yes
-	auto imm2 = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-	auto mut2 = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
-
-	if (mut != mut2 || imm != imm2)
-		goto restart;
+	auto &imm = immutable_map;
+	auto &mut = mutable_map;
 
 	// XXX: think about consistency guarantees with regard to lookups in several maps
 	// Maybe we could use sharding for dram also and then each key would have specific lock
@@ -244,11 +227,23 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 // 		// }
 // }
 
-void new_map::start_bg_compaction(std::shared_ptr<dram_map_type> imm)
+static std::atomic<int> cnt = 0;
+
+// XXX: make sure imm is alive for this funcion duration
+std::thread new_map::start_bg_compaction()
 {
 	// XXX: create thread pool
-	auto compaction_thread = std::thread([&, imm=imm]{
-		std::shared_lock<std::shared_timed_mutex> lock(iteration_mtx);
+	return std::thread([&]{
+#ifndef NDEBUG
+		cnt++;
+		/* There is only one compaction thread */
+		assert(cnt == 1);
+#endif
+
+		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
+
+		auto imm_size = immutable_map->size(); // XXX: ifndef NDEBUG
+
 		try {
 		pmem::obj::transaction::run(pmpool, [&]{
 			// XXX: should we ever shrink?
@@ -257,17 +252,30 @@ void new_map::start_bg_compaction(std::shared_ptr<dram_map_type> imm)
 			assert(insert_log->size() == 0);
 			assert(remove_log->size() == 0);
 
-			insert_log->reserve(imm->size());
-			remove_log->reserve(imm->size());
+			/* It's safe to use immutable_map ptr without locks since no other thread
+			 * can modify it until it's null. */
 
-				std::unique_lock<std::shared_timed_mutex> lock(it_mtx);
+			// XXX: use some heuristic to decrease the space for logs (e.g. size() / 2)
+			insert_log->reserve(immutable_map->size());
+			remove_log->reserve(immutable_map->size());
 
-			for (const auto &e : *imm) {
-				if ((uint64_t) e.second.data() == dram_map_type::tombstone)
+#ifndef  NDEBUG
+			size_t elements = 0;
+#endif
+
+			for (const auto &e : *immutable_map) {
+				if (e.second == dram_map_type::tombstone) {
 					remove_log->emplace_back(e.first);
-				else
+				} else
 					insert_log->emplace_back(e.first, e.second);
+
+#ifndef  NDEBUG
+				elements++;
+#endif
 			}
+
+			assert(elements == immutable_map->size());
+			
 		});
 
 		{
@@ -281,23 +289,42 @@ void new_map::start_bg_compaction(std::shared_ptr<dram_map_type> imm)
 			}
 		}
 
+
 		pmem::obj::transaction::run(pmpool, [&]{
 			insert_log->clear();
 			remove_log->clear();
 		});
 
+
 		// XXX - move this before cleaning logs - how to solve problem with closing db?
-		std::atomic_store_explicit(&immutable_map, std::shared_ptr<dram_map_type>(nullptr), std::memory_order_release);
+		std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+
+		// XXX debug
+#ifndef  NDEBUG
+		for (const auto &e : *immutable_map) {
+			if (e.second == dram_map_type::tombstone) {
+				assert(container->count(string_view(e.first.data(), e.first.size())) == 0);
+			}
+			else
+				assert(container->count(string_view(e.first.data(), e.first.size())) == 1);
+		}
+#endif
+
+		immutable_map = nullptr;
+
+		compaction_cv.notify_all(); // -> one?
+	
+#ifndef NDEBUG
+		cnt--;
+#endif
 
 		} catch(std::exception &e) {
 			std::cout << e.what() << std::endl;
 		}
 	});
-
-	compaction_thread.detach();
 }
 
-bool new_map::dram_has_space(std::shared_ptr<dram_map_type> map)
+bool new_map::dram_has_space(std::unique_ptr<dram_map_type> &map)
 {
 	return map->size() < dram_capacity;
 }
@@ -307,77 +334,35 @@ status new_map::put(string_view key, string_view value)
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
 
-	restart:
+	do {
+		std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+		if (dram_has_space(mutable_map)) {
+			mutable_map->put(key, value);
+			return status::OK;
+		} else {
+			sh_lock.unlock();
+			std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
 
-	if (!dram_has_space(mut)) {
-		mut = nullptr;
+			//if (dram_has_space(mutable_map)) continue; // XXX: move after if()?
 
-		while (true) {
-			// XXX: to avoid CAS for immutable/mutable map assignments
-			std::unique_lock<std::mutex> lock(compaction_mtx);
-			mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
-
-			// XXX - what if there is always close right after put?
-			if (dram_has_space(mut)) break;
-
-			auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-			if (imm) {
-				// XXX: wait on cond var
-				//abort();
-				continue;
-			} else {
-				// mut->is_mutable.store(false), std::memory_order_release;
-
-				/* If we end up here, neither mutable nor immutable map can be changed concurrently.
-				 * The only allowed concurrent change is setting immutable_map to nullptr
-				 * (by the compaction thread). */
-				std::atomic_store_explicit(&immutable_map, mut, std::memory_order_release);
-				std::atomic_store_explicit(&mutable_map, std::make_shared<dram_map_type>(), std::memory_order_release);
-
-	// XXX - this won't work we would have to first wait for no onwers and then store mut to immutable_map
-	// but then we would break get()
-	// Should we have some custom ref counted pointer to see from where the counts originated (mut vs imm)??????
-				while (mut.use_count() > 1) {
-					usleep(1000);
-					throw std::runtime_error(std::to_string(mut.use_count()));
-				}
-
-				start_bg_compaction(mut);
+			if (immutable_map) {
+				compaction_cv.wait(lock, [&]{return immutable_map == nullptr;});
 			}
-		}	
-	}
 
-	// once we reach this point, there might be no space in the dram again...
-	// but if buffer is of reasonable size this should not be a problem (we will exceed the capacity by a small value)
-	// we could have custom allocation wrapper - throw exception on eom and restart
+			if (dram_has_space(mutable_map)) continue; // XXX: move after if()?
+			
+			assert(immutable_map == nullptr);
 
-	// XXX - this put might go to IMMUTABLE map (other thread could have just make this map as immutable)
-	// how to solve that for really immutable map? 
+			/* If we end up here, neither mutable nor immutable map can be changed concurrently.
+				* The only allowed concurrent change is setting immutable_map to nullptr
+				* (by the compaction thread). */
+			immutable_map = std::move(mutable_map);
+			mutable_map = std::make_unique<dram_map_type>();
 
-{
-	std::shared_lock<std::shared_timed_mutex> lock(it_mtx, std::defer_lock);
-
-	if (!lock.try_lock())
-		goto restart;
-
-	mut->put(key, value);
-}
-
-	// XXX - is this correct? test this
-	// The idea is to insert the element again to make sure it was not overlooked in the immutable map (we could have inserted it after immutable map was compacted)
-	if (mut != std::atomic_load_explicit(&mutable_map, std::memory_order_acquire))
-		goto restart;
-
-	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-	if (mut == imm)
-		goto restart;
-
-	// XXX???? - problem - other thread could have started the map freezing (just got into else path in the looop).
-	// In the same time, this thread inserts data to the mut map. This way, this new value might not be visible?
-	if (mut->size() >= dram_capacity)
-		goto restart;
+			start_bg_compaction().detach();
+		}
+	} while (true);
 
 	return status::OK;
 }
@@ -385,13 +370,9 @@ status new_map::put(string_view key, string_view value)
 status new_map::remove(string_view key)
 {
 	LOG("remove key=" << std::string(key.data(), key.size()));
-///auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
-	//mut->remove(key);
-
-	//return status::OK;
 
 	// XXX: there is no Way to know if element was actually deleted in thread safe manner
-	return put(key, string_view((const char*)dram_map_type::tombstone, 0));
+	return put(key, dram_map_type::tombstone);
 }
 
 void new_map::Recover()
@@ -422,7 +403,7 @@ void new_map::Recover()
 
 	// mtxs = std::vector<mutex_type>(SHARDS_NUM);
 
-	mutable_map = std::make_shared<dram_map_type>();
+	mutable_map = std::make_unique<dram_map_type>();
 	immutable_map = nullptr;
 
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
