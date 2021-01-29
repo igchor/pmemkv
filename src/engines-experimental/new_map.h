@@ -288,6 +288,8 @@ private:
 	std::mutex compaction_mtx;
 
 	std::shared_timed_mutex iteration_mtx;
+
+	std::shared_timed_mutex it_mtx;
 };
 
 } /* namespace kv */

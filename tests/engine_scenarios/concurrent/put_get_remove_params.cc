@@ -3,6 +3,8 @@
 
 #include "unittest.hpp"
 
+#include "unistd.h"
+
 using namespace pmem::kv;
 
 static void SimpleMultithreadedTest(const size_t threads_number,
@@ -56,6 +58,9 @@ static void MultithreadedTestRemoveDataAside(const size_t threads_number,
 			ASSERT_STATUS(kv.remove(istr), status::OK);
 		}
 	});
+
+	usleep(1000);
+
 	std::size_t cnt = std::numeric_limits<std::size_t>::max();
 	ASSERT_STATUS(kv.count_all(cnt), status::OK);
 	UT_ASSERT(cnt == initial_items);
