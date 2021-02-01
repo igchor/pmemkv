@@ -86,11 +86,6 @@ static status iterate(Iterator first, Iterator last, Pred &&pred,
 		if (!pred(key, value))
 			continue;
 
-		if (key[0] != 'i') {
-			std::cout << key.data() << " " << map << std::endl;
-			x.assign(key.data(), key.size());
-		}
-
 		auto ret =
 			callback(key.data(), key.size(), value.data(), value.size(), arg);
 

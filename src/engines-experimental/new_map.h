@@ -34,6 +34,31 @@ namespace internal
 namespace new_map
 {
 
+struct act_string {
+
+	size_t size() const {
+		return size_;
+	}
+
+	char* data() {
+		return data_.get();
+	}
+
+	const char* data() const {
+		return data_.get();
+	}
+
+	bool operator==(const act_string& rhs) const {
+		if (size() != rhs.size())
+			return false;
+
+		return std::char_traits<char>::compare(data(), rhs.data(), size) == 0;
+	}
+
+	obj::persistent_ptr<char[]> data_;
+	size_t size_;
+};
+
 class key_equal {
 public:
 	template <typename M, typename U>
@@ -71,7 +96,7 @@ private:
 	}
 };
 
-using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
+using pmem_map_type = obj::concurrent_hash_map<act_string, act_string, string_hasher>;
 
 // using pmem_map_type =
 // pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
@@ -83,7 +108,7 @@ using pmem_remove_log_type = obj::vector<obj::string>;
 struct dram_map_type {
 	// using container_type = tbb::concurrent_hash_map<string_view, string_view,
 	// string_hasher>;
-	using container_type = tbb::concurrent_hash_map<std::string, std::string>;
+	using container_type = tbb::concurrent_hash_map<act_string, act_string, string_hasher>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
 	// static constexpr uintptr_t tombstone = std::numeric_limits<uintptr_t>::max();
@@ -91,7 +116,6 @@ struct dram_map_type {
 
 	dram_map_type()
 	{
-		is_mutable = true;
 	}
 
 	~dram_map_type()
@@ -104,41 +128,11 @@ struct dram_map_type {
 		//  }
 	}
 
-	void put(string_view key, string_view value)
-	{
-		container_type::accessor acc;
-
-		// auto k = new char[key.size()];
-		// std::copy(key.begin(), key.data() + key.size(), k);
-
-		// auto v = (char*) tombstone;
-
-		// if ((uint64_t)value.data() != tombstone) {
-		// 	v = new char[value.size()];
-		// 	std::copy(value.begin(), value.data() + value.size(), v);
-		// }
-
-		// container_type::value_type kv{string_view(k, key.size()),
-		// string_view(v, value.size())};
-		container_type::value_type kv{std::string(key.data(), key.size()),
-					      std::string(value.data(), value.size())};
-
-		// XXX - make it exception safe (use C++...)
-		auto inserted = map.insert(acc, kv);
-		if (!inserted) {
-			// if ((uintptr_t) acc->second.data() != tombstone)
-			// 	delete[] acc->second.data();
-			// delete[] kv.first.data();
-
-			acc->second = kv.second;
-		}
-	}
-
 	enum class element_status { alive, removed, not_found };
 
-	element_status get(string_view key, container_type::const_accessor &acc)
+	element_status get(const act_string& key, container_type::const_accessor &acc)
 	{
-		auto found = map.find(acc, std::string(key.data(), key.size()));
+		auto found = map.find(acc, key);
 
 		if (found) {
 			if (acc->second == tombstone)
@@ -151,9 +145,9 @@ struct dram_map_type {
 	}
 
 	/* Element exists in the dram map (alive or tombstone) */
-	bool exists(string_view key)
+	bool exists(const act_string& key)
 	{
-		return map.count(std::string(key.data(), key.size())) == 0 ? false : true;
+		return map.count(key) == 0 ? false : true;
 	}
 
 	// void remove(string_view key) {
@@ -192,8 +186,6 @@ struct dram_map_type {
 	{
 		return map.size();
 	}
-
-	std::atomic<bool> is_mutable;
 
 	container_type map;
 };
