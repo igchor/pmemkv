@@ -147,7 +147,8 @@ engine_base::create_engine(const std::string &engine,
 #ifdef ENGINE_NEW_MAP
 	if (engine == "new_map") {
 		engine_base::check_config_null(engine, cfg);
-		return std::unique_ptr<engine_base>(new pmem::kv::new_map(std::move(cfg)));
+		return std::unique_ptr<engine_base>(
+			new pmem::kv::new_map(std::move(cfg)));
 	}
 #endif
 

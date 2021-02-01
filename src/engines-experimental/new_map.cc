@@ -19,11 +19,10 @@ new_map::new_map(std::unique_ptr<internal::config> cfg)
 
 new_map::~new_map()
 {
-	while (true) {
-		std::unique_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
-		if (immutable_map == nullptr)
-			break;
-	}
+	std::unique_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
+	if (immutable_map == nullptr)
+		compaction_cv.wait(
+					sh_lock, [&] { return immutable_map == nullptr; });
 
 	LOG("Stopped ok");
 }
@@ -40,12 +39,14 @@ status new_map::count_all(std::size_t &cnt)
 
 	// XXX - this is very slow and not thread safe
 	cnt = 0;
-	return get_all([](const char* k, size_t kb, const char* v, size_t vb, void* arg){
-		auto size = static_cast<size_t*>(arg);
-		(*size)++;
+	return get_all(
+		[](const char *k, size_t kb, const char *v, size_t vb, void *arg) {
+			auto size = static_cast<size_t *>(arg);
+			(*size)++;
 
-		return PMEMKV_STATUS_OK;
-	}, &cnt);
+			return PMEMKV_STATUS_OK;
+		},
+		&cnt);
 }
 
 // template <typename Iterator, decltype(std::declval<Iterator>()->first) = {}>
@@ -68,11 +69,9 @@ status new_map::count_all(std::size_t &cnt)
 // 	return it->value();
 // }
 
-static int map = 0;
-static std::string x;
-
 template <typename Iterator, typename Pred>
-static status iterate(Iterator first, Iterator last, Pred &&pred, get_kv_callback *callback, void *arg)
+static status iterate(Iterator first, Iterator last, Pred &&pred,
+		      get_kv_callback *callback, void *arg)
 {
 	for (auto it = first; it != last; ++it) {
 		// string_view key = key(it);
@@ -82,11 +81,6 @@ static status iterate(Iterator first, Iterator last, Pred &&pred, get_kv_callbac
 
 		if (!pred(key, value))
 			continue;
-
-		if (key[0] != 'i') {
-			std::cout << key.data() << " " << map << std::endl;
-			x.assign(key.data(), key.size());
-		}
 
 		auto ret =
 			callback(key.data(), key.size(), value.data(), value.size(), arg);
@@ -100,7 +94,8 @@ static status iterate(Iterator first, Iterator last, Pred &&pred, get_kv_callbac
 
 status new_map::get_all(get_kv_callback *callback, void *arg)
 {
-	LOG("get_all");	std::atomic<bool> shutting_down;
+	LOG("get_all");
+	std::atomic<bool> shutting_down;
 	check_outside_tx();
 
 	std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
@@ -120,13 +115,11 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 		return (!imm || !imm->exists(k)) && !mut->exists(k);
 	};
 
-	map = 0;
 	auto s = iterate(mut->begin(), mut->end(), mut_pred, callback, arg);
 	if (s != status::OK)
 		return s;
 
 	if (imm) {
-		map = 1;
 		s = iterate(imm->begin(), imm->end(), imm_pred, callback, arg);
 		if (s != status::OK)
 			return s;
@@ -139,7 +132,8 @@ status new_map::exists(string_view key)
 {
 	LOG("exists for key=" << std::string(key.data(), key.size()));
 
-	return get(key, [](const char*, size_t, void*){}, nullptr);
+	return get(
+		key, [](const char *, size_t, void *) {}, nullptr);
 }
 
 status new_map::get(string_view key, get_v_callback *callback, void *arg)
@@ -152,10 +146,10 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	auto &mut = mutable_map;
 
 	// XXX: think about consistency guarantees with regard to lookups in several maps
-	// Maybe we could use sharding for dram also and then each key would have specific lock
-	// it would also decrease number of locks take (3 -> 1)
-	// if each dram shard corresponds with pmem shard - much simpler compaction
-	// THINK ABOUT SORTED DATASTRUCTURES!!!
+	// Maybe we could use sharding for dram also and then each key would have specific
+	// lock it would also decrease number of locks take (3 -> 1) if each dram shard
+	// corresponds with pmem shard - much simpler compaction THINK ABOUT SORTED
+	// DATASTRUCTURES!!!
 
 	{
 		dram_map_type::const_accessor_type acc;
@@ -163,11 +157,11 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 		if (s == dram_map_type::element_status::alive) {
 			callback(acc->second.data(), acc->second.size(), arg);
 			return status::OK;
-		} else if (s ==  dram_map_type::element_status::removed) {
+		} else if (s == dram_map_type::element_status::removed) {
 			return status::NOT_FOUND;
 		}
 	}
-	
+
 	{
 		if (imm) {
 			dram_map_type::const_accessor_type acc;
@@ -175,7 +169,7 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 			if (s == dram_map_type::element_status::alive) {
 				callback(acc->second.data(), acc->second.size(), arg);
 				return status::OK;
-			} else if (s ==  dram_map_type::element_status::removed) {
+			} else if (s == dram_map_type::element_status::removed) {
 				return status::NOT_FOUND;
 			}
 		}
@@ -204,121 +198,121 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 
 // void radix_compaction()
 // {
-		// 	std::vector<std::vector<index_type::dram_map_type::value_type*>> elements(SHARDS_NUM);
+// 	std::vector<std::vector<index_type::dram_map_type::value_type*>>
+// elements(SHARDS_NUM);
 
-		// for (auto &e : *imm) {
-		// 	elements[shard(e->first)].push_back(&e);
+// for (auto &e : *imm) {
+// 	elements[shard(e->first)].push_back(&e);
 //}
 
 // 			// // XXX - allocate radix nodes before taking locks (action API?)
 // 		// for (int i = 0; i < SHARDS_NUM; i++) {
-// 		// 	/// XXX: all shards must be saved as a single atomic action (since we don't know the order)
-// 		// 	// use some intermidiate layer? (list of radix nodes?) - we can treat this layer as L0 in LSM-tree probably
+// 		// 	/// XXX: all shards must be saved as a single atomic action (since we
+// don't know the order)
+// 		// 	// use some intermidiate layer? (list of radix nodes?) - we can treat
+// this layer as L0 in LSM-tree probably
 
 // 		// 	unique_lock_type lock(mtxs[i]);
 // 		// 	obj::transaction::run(pmpool, [&]{
 // 		// 		for (const auto &e : elements[i]) {
-// 		// 			if (uintptr_t(e->second.data()) == dram_map_type::tombstone)
+// 		// 			if (uintptr_t(e->second.data()) ==
+// dram_map_type::tombstone)
 // 		// 				(*container)[i].erase(e->first);
-// 		// 			else	
-// 		// 				(*container)[i].insert_or_assign(e->first, e->second);
+// 		// 			else
+// 		// 				(*container)[i].insert_or_assign(e->first,
+// e->second);
 // 		// 		}
 // 		// 	});
 // 		// }
 // }
 
-static std::atomic<int> cnt = 0;
 
 // XXX: make sure imm is alive for this funcion duration
 std::thread new_map::start_bg_compaction()
 {
 	// XXX: create thread pool
-	return std::thread([&]{
-#ifndef NDEBUG
-		cnt++;
-		/* There is only one compaction thread */
-		assert(cnt == 1);
-#endif
-
+	return std::thread([&] {
 		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
+
+		assert(immutable_map != nullptr);
 
 		auto imm_size = immutable_map->size(); // XXX: ifndef NDEBUG
 
 		try {
-		pmem::obj::transaction::run(pmpool, [&]{
-			// XXX: should we ever shrink?
-			// if (log->size() < imm->size())
-			// log->resize(imm->size());
-			assert(insert_log->size() == 0);
-			assert(remove_log->size() == 0);
+			pmem::obj::transaction::run(pmpool, [&] {
+				// XXX: should we ever shrink?
+				// if (log->size() < imm->size())
+				// log->resize(imm->size());
+				assert(insert_log->size() == 0);
+				assert(remove_log->size() == 0);
 
-			/* It's safe to use immutable_map ptr without locks since no other thread
-			 * can modify it until it's null. */
+				/* It's safe to use immutable_map ptr without locks since
+				 * no other thread can modify it until it's null. */
 
-			// XXX: use some heuristic to decrease the space for logs (e.g. size() / 2)
-			insert_log->reserve(immutable_map->size());
-			remove_log->reserve(immutable_map->size());
+				// XXX: use some heuristic to decrease the space for logs
+				// (e.g. size() / 2)
+				insert_log->reserve(immutable_map->size());
+				remove_log->reserve(immutable_map->size());
 
-#ifndef  NDEBUG
-			size_t elements = 0;
+#ifndef NDEBUG
+				size_t elements = 0;
 #endif
 
+				for (const auto &e : *immutable_map) {
+					if (e.second == dram_map_type::tombstone) {
+						remove_log->emplace_back(e.first);
+					} else
+						insert_log->emplace_back(e.first,
+									 e.second);
+
+#ifndef NDEBUG
+					elements++;
+#endif
+				}
+
+				assert(elements == immutable_map->size());
+			});
+
+			{
+
+				for (const auto &e : *insert_log) {
+					container->insert_or_assign(std::move(e.first),
+								    std::move(e.second));
+				}
+
+				for (const auto &e : *remove_log) {
+					container->erase(e);
+				}
+			}
+
+			pmem::obj::transaction::run(pmpool, [&] {
+				insert_log->clear();
+				remove_log->clear();
+			});
+
+			// XXX - move this before cleaning logs - how to solve problem
+			// with closing db?
+			std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+
+			// XXX debug
+#ifndef NDEBUG
 			for (const auto &e : *immutable_map) {
 				if (e.second == dram_map_type::tombstone) {
-					remove_log->emplace_back(e.first);
+					assert(container->count(string_view(
+						       e.first.data(), e.first.size())) ==
+					       0);
 				} else
-					insert_log->emplace_back(e.first, e.second);
-
-#ifndef  NDEBUG
-				elements++;
-#endif
+					assert(container->count(string_view(
+						       e.first.data(), e.first.size())) ==
+					       1);
 			}
-
-			assert(elements == immutable_map->size());
-			
-		});
-
-		{
-			
-			for (const auto &e : *insert_log) {
-				container->insert_or_assign(std::move(e.first), std::move(e.second));
-			}
-
-			for (const auto &e : *remove_log) {
-				container->erase(e);
-			}
-		}
-
-
-		pmem::obj::transaction::run(pmpool, [&]{
-			insert_log->clear();
-			remove_log->clear();
-		});
-
-
-		// XXX - move this before cleaning logs - how to solve problem with closing db?
-		std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
-
-		// XXX debug
-#ifndef  NDEBUG
-		for (const auto &e : *immutable_map) {
-			if (e.second == dram_map_type::tombstone) {
-				assert(container->count(string_view(e.first.data(), e.first.size())) == 0);
-			}
-			else
-				assert(container->count(string_view(e.first.data(), e.first.size())) == 1);
-		}
 #endif
 
-		immutable_map = nullptr;
+			immutable_map = nullptr;
 
-		compaction_cv.notify_all(); // -> one?
-	
-#ifndef NDEBUG
-		cnt--;
-#endif
+			compaction_cv.notify_all(); // -> one?
 
-		} catch(std::exception &e) {
+		} catch (std::exception &e) {
 			std::cout << e.what() << std::endl;
 		}
 	});
@@ -344,21 +338,26 @@ status new_map::put(string_view key, string_view value)
 			sh_lock.unlock();
 			std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
 
-			//if (dram_has_space(mutable_map)) continue; // XXX: move after if()?
+			// if (dram_has_space(mutable_map)) continue; // XXX: move after
+			// if()?
 
 			if (immutable_map) {
-				compaction_cv.wait(lock, [&]{return immutable_map == nullptr;});
+				compaction_cv.wait(
+					lock, [&] { return immutable_map == nullptr; });
 			}
 
-			if (dram_has_space(mutable_map)) continue; // XXX: move after if()?
-			
+			if (dram_has_space(mutable_map))
+				continue; // XXX: move after if()?
+
 			assert(immutable_map == nullptr);
 
-			/* If we end up here, neither mutable nor immutable map can be changed concurrently.
-				* The only allowed concurrent change is setting immutable_map to nullptr
-				* (by the compaction thread). */
+			/* If we end up here, neither mutable nor immutable map can be
+			 * changed concurrently. The only allowed concurrent change is
+			 * setting immutable_map to nullptr (by the compaction thread). */
 			immutable_map = std::move(mutable_map);
 			mutable_map = std::make_unique<dram_map_type>();
+
+			assert(immutable_map != nullptr);
 
 			start_bg_compaction().detach();
 		}
@@ -371,7 +370,8 @@ status new_map::remove(string_view key)
 {
 	LOG("remove key=" << std::string(key.data(), key.size()));
 
-	// XXX: there is no Way to know if element was actually deleted in thread safe manner
+	// XXX: there is no Way to know if element was actually deleted in thread safe
+	// manner
 	return put(key, dram_map_type::tombstone);
 }
 
