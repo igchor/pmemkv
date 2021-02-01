@@ -25,6 +25,8 @@
 
 #include <condition_variable>
 
+#include <libpmemobj/action_base.h>
+
 namespace pmem
 {
 namespace kv
@@ -35,6 +37,11 @@ namespace new_map
 {
 
 struct act_string {
+
+	act_string(string_view v) {
+		data_ = pmemobj_oid(v.data());
+		size_ = v.size();
+	}
 
 	size_t size() const {
 		return size_;
@@ -52,11 +59,22 @@ struct act_string {
 		if (size() != rhs.size())
 			return false;
 
-		return std::char_traits<char>::compare(data(), rhs.data(), size) == 0;
+		return std::char_traits<char>::compare(data(), rhs.data(), size()) == 0;
+	}
+
+	bool operator==(string_view rhs) const {
+		if (size() != rhs.size())
+			return false;
+
+		return std::char_traits<char>::compare(data(), rhs.data(), size()) == 0;
+	}
+
+	operator string_view() const {
+		return string_view(data(), size());
 	}
 
 	obj::persistent_ptr<char[]> data_;
-	size_t size_;
+	obj::p<size_t> size_;
 };
 
 class key_equal {
@@ -75,9 +93,9 @@ class string_hasher {
 public:
 	using transparent_key_equal = key_equal;
 
-	size_t operator()(const obj::string &str) const
+	size_t operator()(const act_string &str) const
 	{
-		return hash(str.c_str(), str.size());
+		return hash(str.data(), str.size());
 	}
 
 	size_t operator()(string_view str) const
@@ -105,10 +123,12 @@ using pmem_map_type = obj::concurrent_hash_map<act_string, act_string, string_ha
 using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
 using pmem_remove_log_type = obj::vector<obj::string>;
 
+
 struct dram_map_type {
 	// using container_type = tbb::concurrent_hash_map<string_view, string_view,
 	// string_hasher>;
-	using container_type = tbb::concurrent_hash_map<act_string, act_string, string_hasher>;
+
+	using container_type = tbb::concurrent_hash_map<string_view, string_view>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
 	// static constexpr uintptr_t tombstone = std::numeric_limits<uintptr_t>::max();
@@ -116,6 +136,7 @@ struct dram_map_type {
 
 	dram_map_type()
 	{
+		acts_cnt = 0;
 	}
 
 	~dram_map_type()
@@ -128,14 +149,13 @@ struct dram_map_type {
 		//  }
 	}
 
-	enum class element_status { alive, removed, not_found };
+	enum class element_status {alive, removed, not_found};
 
-	element_status get(const act_string& key, container_type::const_accessor &acc)
-	{
+	element_status get(string_view key, container_type::const_accessor& acc) {
 		auto found = map.find(acc, key);
 
 		if (found) {
-			if (acc->second == tombstone)
+		 	if (acc->second == tombstone)
 				return element_status::removed;
 			else
 				return element_status::alive;
@@ -145,7 +165,7 @@ struct dram_map_type {
 	}
 
 	/* Element exists in the dram map (alive or tombstone) */
-	bool exists(const act_string& key)
+	bool exists(string_view key)
 	{
 		return map.count(key) == 0 ? false : true;
 	}
@@ -187,6 +207,10 @@ struct dram_map_type {
 		return map.size();
 	}
 
+	pobj_action actions[102400];
+	uint64_t offs[102400];
+	std::atomic<size_t> acts_cnt;
+
 	container_type map;
 };
 
@@ -198,8 +222,9 @@ struct pmem_type {
 
 	// obj::vector<pmem_map_type> map;
 	pmem_map_type map;
-	pmem_insert_log_type insert_log;
-	pmem_remove_log_type remove_log;
+	uint64_t offs[1024000];
+	uint64_t off_s;
+	
 	uint64_t reserved[8];
 };
 
@@ -302,6 +327,10 @@ private:
 	container_type *container;
 	pmem_insert_log_type *insert_log;
 	pmem_remove_log_type *remove_log;
+
+	uint64_t *offs;
+	uint64_t *off_s;
+
 	std::unique_ptr<internal::config> config;
 
 	using mutex_type = std::shared_timed_mutex;

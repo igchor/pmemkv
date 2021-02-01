@@ -193,11 +193,10 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	container_type::const_accessor result;
 	auto found = container->find(result, key);
 	if (!found) {
-		std::cout << mut->size() << " " << (imm ? imm->size() : 0) << std::endl;
 		return status::NOT_FOUND;
 	}
 
-	callback(result->second.c_str(), result->second.size(), arg);
+	callback(result->second.data(), result->second.size(), arg);
 
 	return status::OK;
 }
@@ -247,95 +246,63 @@ std::thread new_map::start_bg_compaction()
 
 		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-		auto imm_size = immutable_map->size(); // XXX: ifndef NDEBUG
+		auto actions_s = immutable_map->acts_cnt.load();
 
-		try {
-			pmem::obj::transaction::run(pmpool, [&] {
-				// XXX: should we ever shrink?
-				// if (log->size() < imm->size())
-				// log->resize(imm->size());
-				assert(insert_log->size() == 0);
-				assert(remove_log->size() == 0);
+		pmemobj_memcpy_persist(pmpool.handle(), offs, immutable_map->offs, actions_s);
+		pmemobj_set_value(pmpool.handle(), &immutable_map->actions[actions_s], off_s, actions_s);
 
-				/* It's safe to use immutable_map ptr without locks since
-				 * no other thread can modify it until it's null. */
-
-				// XXX: use some heuristic to decrease the space for logs
-				// (e.g. size() / 2)
-				insert_log->reserve(immutable_map->size());
-				remove_log->reserve(immutable_map->size());
-
-#ifndef NDEBUG
-				size_t elements = 0;
-#endif
-
-				for (const auto &e : *immutable_map) {
-					if (e.second == dram_map_type::tombstone) {
-						remove_log->emplace_back(e.first);
-					} else
-						insert_log->emplace_back(e.first,
-									 e.second);
-
-#ifndef NDEBUG
-					elements++;
-#endif
-				}
-
-				assert(elements == immutable_map->size());
-			});
+		auto ret = pmemobj_publish(pmpool.handle(), immutable_map->actions, actions_s + 1);
+		if (!ret) {
+			std::cout << "ERR " << pmemobj_errormsg() << std::endl;
+			abort();
+		}
 
 			{
 
-				for (const auto &e : *insert_log) {
-					container->insert_or_assign(std::move(e.first),
-								    std::move(e.second));
+				for (const auto &e : *immutable_map) {
+					if (e.first == dram_map_type::tombstone)
+						container->erase(e.first);
+					else
+						container->insert_or_assign(e.first, e.second);
 				}
 
-				for (const auto &e : *remove_log) {
-					container->erase(e);
-				}
 			}
-
-			pmem::obj::transaction::run(pmpool, [&] {
-				insert_log->clear();
-				remove_log->clear();
-			});
 
 			// XXX - move this before cleaning logs - how to solve problem
 			// with closing db?
-			std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+			std::unique_lock<std::shared_timed_mutex> comp_lock(compaction_mtx);
 
 			// XXX debug
-#ifndef NDEBUG
-			for (const auto &e : *immutable_map) {
-				if (e.second == dram_map_type::tombstone) {
-					assert(container->count(string_view(
-						       e.first.data(), e.first.size())) ==
-					       0);
-				} else
-					assert(container->count(string_view(
-						       e.first.data(), e.first.size())) ==
-					       1);
-			}
-#endif
+// #ifndef NDEBUG
+// 			for (const auto &e : *immutable_map) {
+// 				if (e.second == dram_map_type::tombstone) {
+// 					assert(container->count(string_view(
+// 						       e.first.data(), e.first.size())) ==
+// 					       0);
+// 				} else
+// 					assert(container->count(string_view(
+// 						       e.first.data(), e.first.size())) ==
+// 					       1);
+// 			}
+// #endif
 
 			immutable_map = nullptr;
 
 			compaction_cv.notify_all(); // -> one?
 
+			*off_s = 0;
+			pmemobj_persist(pmpool.handle(), off_s, 8);
+
 #ifndef NDEBUG
 			cnt--;
 #endif
 
-		} catch (std::exception &e) {
-			std::cout << e.what() << std::endl;
-		}
 	});
 }
 
 bool new_map::dram_has_space(std::unique_ptr<dram_map_type> &map)
 {
-	return map->size() < dram_capacity;
+	return map->size() < dram_capacity; // XXX: && actions_size < actions.capacity()
 }
 
 status new_map::put(string_view key, string_view value)
@@ -347,7 +314,48 @@ status new_map::put(string_view key, string_view value)
 		std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
 		if (dram_has_space(mutable_map)) {
-			mutable_map->put(key, value);
+			pobj_action k_act;
+			pobj_action v_act;
+
+			// auto k = pmemobj_reserve(pmpool.handle(), &mutable_map->actions[kv_act_cnt], key.size(), 0);
+			// auto v = pmemobj_reserve(pmpool.handle(), &mutable_map->actions[kv_act_cnt + 1], value.size(), 0);
+
+			auto k = pmemobj_reserve(pmpool.handle(), &k_act, key.size(), 0);
+			auto v = pmemobj_reserve(pmpool.handle(), &v_act, value.size(), 0);
+
+			pmemobj_memcpy(pmpool.handle(), pmemobj_direct(k), key.data(), key.size(), 0);
+			pmemobj_memcpy(pmpool.handle(), pmemobj_direct(v), value.data(), value.size(), 0);
+			// XXX - maybe just flush in bg?
+
+			dram_map_type::accessor_type acc;
+			auto ins = mutable_map->map.insert(acc, string_view((char*)pmemobj_direct(k), key.size()));
+			if (!ins) {
+				auto cnt = mutable_map->acts_cnt.fetch_add(2, std::memory_order_release);
+
+				pmemobj_defer_free(pmpool.handle(), pmemobj_oid(acc->second.data()), &mutable_map->actions[cnt]);
+				acc->second = string_view((char*)pmemobj_direct(v), value.size());
+
+				mutable_map->actions[cnt+1] = v_act;
+				pmemobj_cancel(pmpool.handle(), &k_act, 1);
+
+				// XXX: add timestapms? how else determine which update was last
+				// XXX: just move creating those offsets to compaction? (or even just create them on pmem)
+
+				/// XXX: add sizes
+				offs[cnt] = k.off;
+				offs[cnt+1] = v.off;
+			} else {
+				acc->second = string_view((char*)pmemobj_direct(v), value.size());
+
+				auto cnt = mutable_map->acts_cnt.fetch_add(2, std::memory_order_release);
+
+				mutable_map->actions[cnt] = k_act;
+				mutable_map->actions[cnt+1] = v_act;
+
+				offs[cnt] = k.off;
+				offs[cnt+1] = v.off;
+			}
+
 			return status::OK;
 		} else {
 			sh_lock.unlock();
@@ -395,8 +403,8 @@ void new_map::Recover()
 			pmemobj_direct(*root_oid));
 
 		container = &pmem_ptr->map;
-		insert_log = &pmem_ptr->insert_log;
-		remove_log = &pmem_ptr->remove_log;
+			offs=&pmem_ptr->offs[0];
+	off_s=&pmem_ptr->off_s;
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
@@ -407,14 +415,14 @@ void new_map::Recover()
 				pmemobj_direct(*root_oid));
 
 			container = &pmem_ptr->map;
-			insert_log = &pmem_ptr->insert_log;
-			remove_log = &pmem_ptr->remove_log;
-
+				offs=&pmem_ptr->offs[0];
+	off_s=&pmem_ptr->off_s;
 			// container->resize(SHARDS_NUM);
 		});
 	}
 
 	// mtxs = std::vector<mutex_type>(SHARDS_NUM);
+
 
 	mutable_map = std::make_unique<dram_map_type>();
 	immutable_map = nullptr;
