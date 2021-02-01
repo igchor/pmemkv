@@ -61,7 +61,9 @@ public:
 	virtual iterator *new_iterator();
 	virtual iterator *new_const_iterator();
 
-	virtual void flush() {}
+	virtual void flush()
+	{
+	}
 
 private:
 	static void check_config_null(const std::string &engine_name,
