@@ -4,7 +4,10 @@
 #include "new_map.h"
 #include "../out.h"
 
-#include <set>
+#include <tbb/tbb.h>
+
+#include <libpmemobj/action.h>
+
 namespace pmem
 {
 namespace kv
@@ -187,11 +190,10 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	container_type::const_accessor result;
 	auto found = container->find(result, key);
 	if (!found) {
-		std::cout << mut->size() << " " << (imm ? imm->size() : 0) << std::endl;
 		return status::NOT_FOUND;
 	}
 
-	callback(result->second.c_str(), result->second.size(), arg);
+	callback(result->second.data(), result->second.size(), arg);
 
 	return status::OK;
 }
@@ -236,79 +238,127 @@ std::thread new_map::start_bg_compaction()
 
 		assert(immutable_map != nullptr);
 
-		auto imm_size = immutable_map->size(); // XXX: ifndef NDEBUG
+		std::atomic<size_t> tid;
+		tid = 0;
+
+		//std::array<std::vector<pobj_action>, 32> acts;
+
+		//tbb::parallel_for(immutable_map->map.range(128), [&](const dram_map_type::container_type::range_type range){
+		auto range = immutable_map->map.range();
+				auto id = tid.fetch_add(1, std::memory_order_relaxed); // XXX - relaxed?
+				//auto &actions = acts[id];
+				std::vector<pobj_action> actions;
+				actions.reserve(256);
+
+				std::vector<internal::new_map::act_string> removes;
+				std::vector<std::pair<internal::new_map::act_string, internal::new_map::act_string>> inserts;
+
+				for (auto &e : range) {
+					auto &key = e.first;
+					auto &value = e.second;
+
+					internal::new_map::act_string k, v;
+
+					if (key.size() > 0) {
+						actions.emplace_back();
+						k.data_ = pmemobj_reserve(pmpool.handle(), &actions.back(), key.size(), 0);
+						assert(k.data_.get() != nullptr); //XXX
+						pmemobj_memcpy(pmpool.handle(), k.data_.get(), key.data(), key.size(), 0);
+					}
+					
+					if (e.second == dram_map_type::tombstone) {
+						removes.emplace_back(std::move(k));
+					} else {
+						if (value.size() > 0) {
+							actions.emplace_back();
+							v.data_ = pmemobj_reserve(pmpool.handle(), &actions.back(), value.size(), 0);
+							assert(v.data_.get() != nullptr); //XXX
+							pmemobj_memcpy(pmpool.handle(), v.data_.get(), value.data(), value.size(), 0);
+						}
+
+						inserts.emplace_back(std::move(k), std::move(v));
+					}
+				}
+
+				if (inserts.size() > 0) {
+					actions.emplace_back();
+					pmem->insert_logs[id].data = pmemobj_reserve(pmpool.handle(), &actions.back(), inserts.size() * sizeof(inserts[0]), 0);
+					assert(pmem->insert_logs[id].data.get() != nullptr); //XXX
+					pmemobj_flush(pmpool.handle(), pmem->insert_logs[id].data.get(), 8);
+					pmemobj_memcpy(pmpool.handle(), pmem->insert_logs[id].data.get(), inserts.data(), inserts.size() * sizeof(inserts[0]), 0);
+				}
+
+				if (removes.size() > 0) {
+					actions.emplace_back();
+					pmem->remove_logs[id].data = pmemobj_reserve(pmpool.handle(), &actions.back(), removes.size() * sizeof(removes[0]), 0);
+					assert(pmem->insert_logs[id].data.get() != nullptr); //XXX
+					pmemobj_flush(pmpool.handle(), pmem->remove_logs[id].data.get(), 8);
+					pmemobj_memcpy(pmpool.handle(), pmem->remove_logs[id].data.get(), removes.data(), removes.size() * sizeof(removes[0]), 0);
+				}
+
+				actions.emplace_back();
+				pmemobj_set_value(pmpool.handle(), &actions.back(), &pmem->insert_logs[id].size, inserts.size());
+				actions.emplace_back();
+				pmemobj_set_value(pmpool.handle(), &actions.back(), &pmem->remove_logs[id].size, removes.size());
+
+				pmemobj_drain(pmpool.handle()); // can be in main thread?
+
+				if(pmemobj_publish(pmpool.handle(), actions.data(), actions.size()) != 0) {// XXX: This should be atomic for all elements
+					std::cout << "XXX" << std::endl;
+					throw std::runtime_error("XXX");
+				}
+		//});
+		
+		// for (int id = 0; id < tid.load(); id++) {
+		// 	if(pmemobj_publish(pmpool.handle(), &acts[i].back(), acts[i].size()) != 0) // XXX: This should be atomic for all elements
+		// 		throw std::runtime_error("XXX");
+		// }
+
+		pmem->n_logs = tid.load();
+		pmemobj_persist(pmpool.handle(), &pmem->n_logs, 8);
 
 		try {
-			pmem::obj::transaction::run(pmpool, [&] {
-				// XXX: should we ever shrink?
-				// if (log->size() < imm->size())
-				// log->resize(imm->size());
-				assert(insert_log->size() == 0);
-				assert(remove_log->size() == 0);
 
-				/* It's safe to use immutable_map ptr without locks since
-				 * no other thread can modify it until it's null. */
-
-				// XXX: use some heuristic to decrease the space for logs
-				// (e.g. size() / 2)
-				insert_log->reserve(immutable_map->size());
-				remove_log->reserve(immutable_map->size());
-
-#ifndef NDEBUG
-				size_t elements = 0;
-#endif
-
-				for (const auto &e : *immutable_map) {
-					if (e.second == dram_map_type::tombstone) {
-						remove_log->emplace_back(e.first);
-					} else
-						insert_log->emplace_back(e.first,
-									 e.second);
-
-#ifndef NDEBUG
-					elements++;
-#endif
+			//tbb::parallel_for(tbb::blocked_range<decltype(&pmem->insert_logs[0])>(&pmem->insert_logs[0], &pmem->insert_logs[0] + pmem->n_logs), [&](const tbb::blocked_range<decltype(&pmem->insert_logs[0])> &range){
+				{auto range = tbb::blocked_range<decltype(&pmem->insert_logs[0])>(&pmem->insert_logs[0], &pmem->insert_logs[0] + pmem->n_logs);
+				for (auto &r : range) {
+					for (int i = 0; i < r.size; i++) {
+						auto &e = r.data[i];
+						container->insert_or_assign(std::move(e.first), std::move(e.second));
+					}
 				}
-
-				assert(elements == immutable_map->size());
-			});
-
-			{
-
-				for (const auto &e : *insert_log) {
-					container->insert_or_assign(std::move(e.first),
-								    std::move(e.second));
 				}
+			//});
 
-				for (const auto &e : *remove_log) {
-					container->erase(e);
+
+			//tbb::parallel_for(tbb::blocked_range<decltype(&pmem->remove_logs[0])>(&pmem->remove_logs[0], &pmem->remove_logs[0] + pmem->n_logs), [&](const tbb::blocked_range<decltype(&pmem->remove_logs[0])> &range){
+				{auto range = tbb::blocked_range<decltype(&pmem->remove_logs[0])>(&pmem->remove_logs[0], &pmem->remove_logs[0] + pmem->n_logs);
+				for (auto &r : range) {
+					for (int i = 0; i < r.size; i++) {
+						auto &e = r.data[i];
+						container->erase(e);
+					}
 				}
-			}
+				}
+			//});
 
-			pmem::obj::transaction::run(pmpool, [&] {
-				insert_log->clear();
-				remove_log->clear();
-			});
+
+
+			// XXX - free the logs and keys from the logs
+			// std::vector<pobj_action> actions(tid.load() * 2 + 4);
+			// for (int id = 0; id < tid.load(); id++) {
+			// 	actions.emplace_back();
+			// 	pmemobj_defer_free(pmpool.handle(), pmem->insert_logs[id].get(), &actions.back());
+			// 	actions.emplace_back();
+			// 	pmemobj_defer_free(pmpool.handle(), pmem->remove_logs[id].get(), &actions.back());
+			// }
 
 			// XXX - move this before cleaning logs - how to solve problem
 			// with closing db?
-			std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
-
-			// XXX debug
-#ifndef NDEBUG
-			for (const auto &e : *immutable_map) {
-				if (e.second == dram_map_type::tombstone) {
-					assert(container->count(string_view(
-						       e.first.data(), e.first.size())) ==
-					       0);
-				} else
-					assert(container->count(string_view(
-						       e.first.data(), e.first.size())) ==
-					       1);
+			{
+				std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+				immutable_map = nullptr;
 			}
-#endif
-
-			immutable_map = nullptr;
 
 			compaction_cv.notify_all(); // -> one?
 
@@ -378,24 +428,20 @@ status new_map::remove(string_view key)
 void new_map::Recover()
 {
 	if (!OID_IS_NULL(*root_oid)) {
-		auto pmem_ptr = static_cast<internal::new_map::pmem_type *>(
+		pmem = static_cast<internal::new_map::pmem_type *>(
 			pmemobj_direct(*root_oid));
 
-		container = &pmem_ptr->map;
-		insert_log = &pmem_ptr->insert_log;
-		remove_log = &pmem_ptr->remove_log;
+		container = &pmem->map;
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
 			*root_oid =
 				pmem::obj::make_persistent<internal::new_map::pmem_type>()
 					.raw();
-			auto pmem_ptr = static_cast<internal::new_map::pmem_type *>(
+			pmem = static_cast<internal::new_map::pmem_type *>(
 				pmemobj_direct(*root_oid));
 
-			container = &pmem_ptr->map;
-			insert_log = &pmem_ptr->insert_log;
-			remove_log = &pmem_ptr->remove_log;
+			container = &pmem->map;
 
 			// container->resize(SHARDS_NUM);
 		});
@@ -409,6 +455,9 @@ void new_map::Recover()
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
 	if (dram_capacity)
 		this->dram_capacity = std::stoi(dram_capacity);
+
+	oneapi::tbb::global_control c(oneapi::tbb::global_control::max_allowed_parallelism,
+                                 12);
 }
 
 } // namespace kv

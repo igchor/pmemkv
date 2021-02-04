@@ -34,6 +34,69 @@ namespace internal
 namespace new_map
 {
 
+	struct act_string {
+
+		act_string() { data_ = nullptr; size_ = 0; }
+
+	act_string(PMEMoid oid, size_t size) {
+		data_ = oid;
+		size_ = size;
+	}
+
+	act_string(act_string&& rhs): data_(rhs.data_), size_(rhs.size_) {
+		rhs.data_ = nullptr;
+		rhs.size_ = 0;
+	}
+
+	act_string& operator=(act_string&& rhs) {
+		data_ = rhs.data_;
+		size_ = rhs.size_;
+
+		rhs.data_ = nullptr;
+		rhs.size_ = 0;
+
+		return *this;
+	}
+
+	// act_string(string_view v) {
+	// 	data_ = pmemobj_oid(v.data());
+	// 	size_ = v.size();
+	// }
+
+	size_t size() const {
+		return size_;
+	}
+
+	char* data() {
+		return data_.get();
+	}
+
+	const char* data() const {
+		return data_.get();
+	}
+
+	bool operator==(const act_string& rhs) const {
+		if (size() != rhs.size())
+			return false;
+
+		return std::char_traits<char>::compare(data(), rhs.data(), size()) == 0;
+	}
+
+	bool operator==(string_view rhs) const {
+		if (size() != rhs.size())
+			return false;
+
+		return std::char_traits<char>::compare(data(), rhs.data(), size()) == 0;
+	}
+
+	operator string_view() const {
+		return string_view(data(), size());
+	}
+
+	obj::persistent_ptr<char[]> data_;
+	obj::p<size_t> size_;
+};
+
 class key_equal {
 public:
 	template <typename M, typename U>
@@ -60,6 +123,11 @@ public:
 		return hash(str.data(), str.size());
 	}
 
+	size_t operator()(const act_string &str) const
+	{
+		return hash(str.data(), str.size());
+	}
+
 private:
 	size_t hash(const char *str, size_t size) const
 	{
@@ -71,14 +139,23 @@ private:
 	}
 };
 
-using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
+using pmem_map_type = obj::concurrent_hash_map<act_string, act_string, string_hasher>;
 
 // using pmem_map_type =
 // pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
 // 					    pmem::obj::experimental::inline_string>;
 
-using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
-using pmem_remove_log_type = obj::vector<obj::string>;
+// using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
+// using pmem_remove_log_type = obj::vector<obj::string>;
+
+template <typename T>
+struct log_type {
+	obj::persistent_ptr<T[]> data;
+	size_t size;
+};
+
+using pmem_insert_log_type = log_type<std::pair<act_string, act_string>>;
+using pmem_remove_log_type = log_type<act_string>;
 
 struct dram_map_type {
 	// using container_type = tbb::concurrent_hash_map<string_view, string_view,
@@ -206,8 +283,11 @@ struct pmem_type {
 
 	// obj::vector<pmem_map_type> map;
 	pmem_map_type map;
-	pmem_insert_log_type insert_log;
-	pmem_remove_log_type remove_log;
+	pmem_insert_log_type insert_logs[64];
+	pmem_remove_log_type remove_logs[64];
+
+	size_t n_logs;
+
 	uint64_t reserved[8];
 };
 
@@ -301,6 +381,7 @@ private:
 	using dram_map_type = internal::new_map::dram_map_type;
 	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
 	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
+	using pmem_type = internal::new_map::pmem_type;
 
 	std::thread start_bg_compaction();
 	bool dram_has_space(std::unique_ptr<dram_map_type> &map);
@@ -308,8 +389,7 @@ private:
 	void Recover();
 
 	container_type *container;
-	pmem_insert_log_type *insert_log;
-	pmem_remove_log_type *remove_log;
+	pmem_type* pmem;
 	std::unique_ptr<internal::config> config;
 
 	using mutex_type = std::shared_timed_mutex;

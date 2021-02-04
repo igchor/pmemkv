@@ -9,4 +9,4 @@ else()
 endif()
 
 include_directories(${LIBPMEMOBJ++_INCLUDE_DIRS})
-link_directories(${LIBPMEMOBJ++_LIBRARY_DIRS})
+link_directories(${LIBPMEMOBJ++_LIBRARY_DIRS}/pmdk_debug)

@@ -215,6 +215,8 @@ if(COVERAGE)
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -coverage")
 endif()
 
+SET(CMAKE_EXE_LINKER_FLAGS "-Wl,--enable-new-dtags")
+
 add_common_flag(-Wall)
 add_common_flag(-Wpointer-arith)
 add_common_flag(-Wsign-compare)
