@@ -4,6 +4,8 @@
 #include "new_map.h"
 #include "../out.h"
 
+#include <tbb/tbb.h>
+
 #include <set>
 namespace pmem
 {
@@ -138,6 +140,7 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 {
 	LOG("get key=" << std::string(key.data(), key.size()));
 
+	std::shared_lock<std::shared_timed_mutex> it_lock(iteration_mtx);
 	std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
 	auto &imm = immutable_map;
@@ -185,7 +188,6 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	container_type::const_accessor result;
 	auto found = container->find(result, key);
 	if (!found) {
-		std::cout << mut->size() << " " << (imm ? imm->size() : 0) << std::endl;
 		return status::NOT_FOUND;
 	}
 
@@ -194,39 +196,11 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	return status::OK;
 }
 
-// void radix_compaction()
-// {
-// 	std::vector<std::vector<index_type::dram_map_type::value_type*>>
-// elements(SHARDS_NUM);
-
-// for (auto &e : *imm) {
-// 	elements[shard(e->first)].push_back(&e);
-//}
-
-// 			// // XXX - allocate radix nodes before taking locks (action API?)
-// 		// for (int i = 0; i < SHARDS_NUM; i++) {
-// 		// 	/// XXX: all shards must be saved as a single atomic action (since
-// we don't know the order)
-// 		// 	// use some intermidiate layer? (list of radix nodes?) - we can
-// treat this layer as L0 in LSM-tree probably
-
-// 		// 	unique_lock_type lock(mtxs[i]);
-// 		// 	obj::transaction::run(pmpool, [&]{
-// 		// 		for (const auto &e : elements[i]) {
-// 		// 			if (uintptr_t(e->second.data()) ==
-// dram_map_type::tombstone)
-// 		// 				(*container)[i].erase(e->first);
-// 		// 			else
-// 		// 				(*container)[i].insert_or_assign(e->first,
-// e->second);
-// 		// 		}
-// 		// 	});
-// 		// }
-// }
-
 // XXX: make sure imm is alive for this funcion duration
 std::thread new_map::start_bg_compaction()
 {
+	static std::mutex test_mtx;
+
 	// XXX: create thread pool
 	return std::thread([&] {
 		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
@@ -234,58 +208,80 @@ std::thread new_map::start_bg_compaction()
 		assert(immutable_map != nullptr);
 
 		try {
-			pmem::obj::transaction::run(pmpool, [&] {
-				// XXX: should we ever shrink?
-				// if (log->size() < imm->size())
-				// log->resize(imm->size());
-				assert(insert_log->size() == 0);
-				assert(remove_log->size() == 0);
+			std::atomic<size_t> tid;
+			tid = 0;
 
-				/* It's safe to use immutable_map ptr without locks since
-				 * no other thread can modify it until it's null. */
+			auto range = immutable_map->map.range(grainsize);
 
-				// XXX: use some heuristic to decrease the space for logs
-				// (e.g. size() / 2)
-				insert_log->reserve(immutable_map->size());
-				remove_log->reserve(immutable_map->size());
+			tbb::parallel_for(
+				range,
+				[&](const dram_map_type::container_type::range_type
+					    &range) {
+					auto id = tid.fetch_add(1, std::memory_order_relaxed); // XXX: order?
 
-				// #ifndef NDEBUG
-				// 				size_t elements = 0;
-				// #endif
+					pmem::obj::transaction::run(pmpool, [&] {
+						assert(pmem->insert_log[id].size() == 0);
+						assert(pmem->remove_log[id].size() == 0);
 
-				for (const auto &e : *immutable_map) {
-					if (e.second == dram_map_type::tombstone) {
-						remove_log->emplace_back(e.first);
-					} else {
-						insert_log->emplace_back(e.first,
-									 e.second);
+						pmem->insert_log[id].reserve(
+							immutable_map->size());
+						pmem->remove_log[id].reserve(
+							immutable_map->size());
+
+						for (const auto &e : range) {
+							if (e.second ==
+							    dram_map_type::tombstone) {
+								pmem->remove_log[id]
+									.emplace_back(
+										e.first);
+							} else {
+								pmem->insert_log[id]
+									.emplace_back(
+										e.first,
+										e.second);
+							}
+						}
+					});
+				});
+
+			pmem->logs = tid.load();
+			pmpool.persist(pmem->logs);
+
+			assert(pmem->logs > 0);
+
+			using range_type_in =
+				tbb::blocked_range<decltype(&pmem->insert_log[0])>;
+			tbb::parallel_for(
+				range_type_in(&pmem->insert_log[0],
+					      &pmem->insert_log[0] + pmem->logs),
+				[&](const range_type_in &range) {
+					for (auto &r : range) {
+						for (auto &e : r) {
+							container->insert_or_assign(
+								std::move(e.first),
+								std::move(e.second));
+						}
 					}
+				});
 
-					// 					in.insert(e.first);
-					// #ifndef NDEBUG
-					// 					elements++;
-					// #endif
-				}
-
-				// 				assert(elements ==
-				// immutable_map->size());
-			});
-
-			{
-
-				for (const auto &e : *insert_log) {
-					container->insert_or_assign(std::move(e.first),
-								    std::move(e.second));
-				}
-
-				for (const auto &e : *remove_log) {
-					container->erase(e);
-				}
-			}
+			using range_type_re =
+				tbb::blocked_range<decltype(&pmem->remove_log[0])>;
+			tbb::parallel_for(
+				range_type_re(&pmem->remove_log[0],
+					      &pmem->remove_log[0] + pmem->logs),
+				[&](const range_type_re &range) {
+					for (auto &r : range) {
+						for (auto &e : r) {
+							container->erase(e);
+						}
+					}
+				});
 
 			pmem::obj::transaction::run(pmpool, [&] {
-				insert_log->clear();
-				remove_log->clear();
+				for (int i = 0; i < pmem->logs; i++) {
+					pmem->insert_log[i].clear();
+					pmem->remove_log[i].clear();
+				}
 			});
 
 			// XXX debug
@@ -301,6 +297,9 @@ std::thread new_map::start_bg_compaction()
 					       1);
 			}
 #endif
+
+			pmem->logs = 0;
+			pmpool.persist(pmem->logs);
 
 			{
 				std::unique_lock<std::shared_timed_mutex> lock(
@@ -368,24 +367,20 @@ status new_map::remove(string_view key)
 void new_map::Recover()
 {
 	if (!OID_IS_NULL(*root_oid)) {
-		auto pmem_ptr = static_cast<internal::new_map::pmem_type *>(
+		pmem = static_cast<internal::new_map::pmem_type *>(
 			pmemobj_direct(*root_oid));
 
-		container = &pmem_ptr->map;
-		insert_log = &pmem_ptr->insert_log;
-		remove_log = &pmem_ptr->remove_log;
+		container = &pmem->map;
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
 			*root_oid =
 				pmem::obj::make_persistent<internal::new_map::pmem_type>()
 					.raw();
-			auto pmem_ptr = static_cast<internal::new_map::pmem_type *>(
+			pmem = static_cast<internal::new_map::pmem_type *>(
 				pmemobj_direct(*root_oid));
 
-			container = &pmem_ptr->map;
-			insert_log = &pmem_ptr->insert_log;
-			remove_log = &pmem_ptr->remove_log;
+			container = &pmem->map;
 
 			// container->resize(SHARDS_NUM);
 		});
@@ -399,6 +394,13 @@ void new_map::Recover()
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
 	if (dram_capacity)
 		this->dram_capacity = std::stoi(dram_capacity);
+
+	auto grainsize = std::getenv("GRAINSIZE");
+	if (grainsize)
+		this->grainsize = std::stoi(grainsize);
+
+	oneapi::tbb::global_control c(
+		oneapi::tbb::global_control::max_allowed_parallelism, 24);
 }
 
 } // namespace kv

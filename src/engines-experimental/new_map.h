@@ -206,8 +206,9 @@ struct pmem_type {
 
 	// obj::vector<pmem_map_type> map;
 	pmem_map_type map;
-	pmem_insert_log_type insert_log;
-	pmem_remove_log_type remove_log;
+	pmem_insert_log_type insert_log[1024];
+	pmem_remove_log_type remove_log[1024];
+	obj::p<size_t> logs;
 	uint64_t reserved[8];
 };
 
@@ -294,6 +295,7 @@ private:
 	using dram_map_type = internal::new_map::dram_map_type;
 	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
 	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
+	using pmem_type = internal::new_map::pmem_type;
 
 	std::thread start_bg_compaction();
 	bool dram_has_space(std::unique_ptr<dram_map_type> &map);
@@ -301,8 +303,7 @@ private:
 	void Recover();
 
 	container_type *container;
-	pmem_insert_log_type *insert_log;
-	pmem_remove_log_type *remove_log;
+	pmem_type *pmem;
 	std::unique_ptr<internal::config> config;
 
 	using mutex_type = std::shared_timed_mutex;
@@ -314,6 +315,8 @@ private:
 	// static constexpr uint64_t dram_capacity = 1024; /// XXX: parameterize this
 
 	uint64_t dram_capacity = 1024;
+
+	uint64_t grainsize = 128;
 
 	std::unique_ptr<dram_map_type> mutable_map;
 	std::unique_ptr<dram_map_type> immutable_map;
