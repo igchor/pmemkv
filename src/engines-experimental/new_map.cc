@@ -25,9 +25,6 @@ new_map::new_map(std::unique_ptr<internal::config> cfg)
 
 new_map::~new_map()
 {
-	std::unique_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
-	compaction_cv.wait(sh_lock, [&] { return immutable_map == nullptr; });
-
 	LOG("Stopped ok");
 }
 
@@ -42,15 +39,8 @@ status new_map::count_all(std::size_t &cnt)
 	check_outside_tx();
 
 	// XXX - this is very slow and not thread safe
-	cnt = 0;
-	return get_all(
-		[](const char *k, size_t kb, const char *v, size_t vb, void *arg) {
-			auto size = static_cast<size_t *>(arg);
-			(*size)++;
-
-			return PMEMKV_STATUS_OK;
-		},
-		&cnt);
+	cnt = index->size();
+	return status::OK;
 }
 
 // template <typename Iterator, decltype(std::declval<Iterator>()->first) = {}>
@@ -100,9 +90,8 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 {
 	LOG("get_all");
 	std::atomic<bool> shutting_down;
-	check_outside_tx();
-
-	return status::OK;
+	
+	return iterate(index->begin(), index->end(), [](string_view, string_view) { return true;}, callback, arg);
 }
 
 status new_map::exists(string_view key)
@@ -117,17 +106,14 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 {
 	LOG("get key=" << std::string(key.data(), key.size()));
 
-	return status::OK;
-}
+	dram_index::const_accessor acc;
+	auto ret = index->find(acc, key);
+	if (ret) {
+		callback(acc->second.data(), acc->second.size(), arg);
+		return status::OK;	
+	}
 
-// XXX: make sure imm is alive for this funcion duration
-std::thread new_map::start_bg_compaction()
-{
-}
-
-bool new_map::dram_has_space(std::unique_ptr<dram_map_type> &map)
-{
-	return map->size() < dram_capacity;
+	return status::NOT_FOUND;
 }
 
 status new_map::put(string_view key, string_view value)
@@ -135,32 +121,19 @@ status new_map::put(string_view key, string_view value)
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
 
-	std::vector<pobj_action> actions(6);
+	auto idx = cnt.fetch_add(1, std::memory_order_relaxed); // XXX: memory order?
 
-	actions.emplace_back();
-	auto k = pmemobj_reserve(pmpool.handle(), &actions.back(), key.size(), 0);
-	actions.emplace_back();
-	auto v = pmemobj_reserve(pmpool.handle(), &actions.back(), value.size(), 0);
+	actions acts(pmpool, 8);
 
-	pmemobj_memcpy(pmpool.handle(), pmemobj_direct(k), key.data(), key.size(), 0);
-	pmemobj_memcpy(pmpool.handle(), pmemobj_direct(v), value.data(), value.size(), 0);
-
-	auto id = cnt.fetch_add(1, std::memory_order_relaxed);
-
-	actions.emplace_back();
-	pmemobj_set_value(pmpool.handle(), &actions.back(), &pmem->str[id].first.data.off, k.off);
-	actions.emplace_back();
-	pmemobj_set_value(pmpool.handle(), &actions.back(), &pmem->str[id].first.size, key.size());
-
-	actions.emplace_back();
-	pmemobj_set_value(pmpool.handle(), &actions.back(), &pmem->str[id].second.data.off, v.off);
-	actions.emplace_back();
-	pmemobj_set_value(pmpool.handle(), &actions.back(), &pmem->str[id].first.size, value.size());
+	pmem->str[idx].first.assign(acts, key);
+	pmem->str[idx].second.assign(acts, value);
 
 	pmemobj_drain(pmpool.handle());
-	pmemobj_publish(pmpool.handle(), actions.data(), actions.size());
+	acts.publish();
 
-	map11.insert({k.off, v.off});
+	dram_index::accessor acc;
+	auto ret = index->insert(acc, string_view(pmem->str[idx].first));
+	acc->second = string_view(pmem->str[idx].second);
 
 	return status::OK;
 }
@@ -169,9 +142,7 @@ status new_map::remove(string_view key)
 {
 	LOG("remove key=" << std::string(key.data(), key.size()));
 
-	// XXX: there is no Way to know if element was actually deleted in thread safe
-	// manner
-	return put(key, dram_map_type::tombstone);
+	return index->erase(key) ? status::OK : status::NOT_FOUND;
 }
 
 void new_map::Recover()
@@ -180,38 +151,24 @@ void new_map::Recover()
 	if (dram_capacity)
 		this->dram_capacity = std::stoi(dram_capacity);
 
-	auto grainsize = std::getenv("GRAINSIZE");
-	if (grainsize)
-		this->grainsize = std::stoi(grainsize);
-
 	if (!OID_IS_NULL(*root_oid)) {
-		pmem = static_cast<internal::new_map::pmem_type *>(
+		pmem = static_cast<pmem_type *>(
 			pmemobj_direct(*root_oid));
 
-		container = &pmem->map;
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
 			*root_oid =
-				pmem::obj::make_persistent<internal::new_map::pmem_type>()
+				pmem::obj::make_persistent<pmem_type>()
 					.raw();
-			pmem = static_cast<internal::new_map::pmem_type *>(
+			pmem = static_cast<pmem_type *>(
 				pmemobj_direct(*root_oid));
 
-			container = &pmem->map;
-
-			pmem->str = obj::make_persistent<std::pair<internal::new_map::act_string, internal::new_map::act_string>[]>(dram_capacity);
-
-			// container->resize(SHARDS_NUM);
+			pmem->str = obj::make_persistent<std::pair<act_string, act_string>[]>(this->dram_capacity);
 		});
 	}
 
-	// mtxs = std::vector<mutex_type>(SHARDS_NUM);
-
-	mutable_map = std::make_unique<dram_map_type>();
-	immutable_map = nullptr;
-
-	cnt = 0;
+	index = std::make_unique<dram_index>();
 }
 
 } // namespace kv
