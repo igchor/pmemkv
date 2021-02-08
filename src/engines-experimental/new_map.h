@@ -82,106 +82,6 @@ private:
     std::vector<pobj_action> acts;
 };
 
-struct act_string {
-	act_string() {
-		data_ = nullptr;
-		size_ = 0;
-	}
-
-	// XXX: implement destruction
-
-    act_string(actions &acts, string_view rhs) {
-		if (rhs.size() == 0) {
-			data_ = nullptr;
-			size_ = 0;
-			return;
-		}
-
-        data_ = acts.allocate<char[]>(rhs.size());
-        size_ = rhs.size();
-
-		//pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
-		std::copy(rhs.data(), rhs.data() + rhs.size(), data_.get());
-
-        // XXX: flush here?
-    }
-
-    act_string& operator=(const act_string& rhs) = delete;
-
-	void assign(actions& acts, string_view rhs) {
-		if (rhs.size() == 0) {
-			acts.set_value(&data_.raw_ptr()->off, 0);
-			acts.set_value(&size_, 0);
-			return;
-		}
-
-		if (data_ != nullptr)
-			acts.free(data_);
-
-		auto v = acts.allocate<char[]>(rhs.size());
-		pmemobj_memcpy(acts.get_pool().handle(), v.get(), rhs.data(), rhs.size(), 0);
-
-		acts.set_value(&data_.raw_ptr()->off, v.raw().off);
-		acts.set_value(&data_.raw_ptr()->pool_uuid_lo, v.raw().pool_uuid_lo);
-		acts.set_value(&size_, rhs.size());
-	}
-
-	void assign_init(actions& acts, string_view rhs) {
-		if (rhs.size() == 0) {
-			data_ = nullptr;
-			size_ = 0;
-			return;
-		}
-
-		assert(data_ == nullptr);
-
-		data_ = acts.allocate<char[]>(rhs.size());;
-		size_ = rhs.size();
-
-		//pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
-		std::copy(rhs.data(), rhs.data() + rhs.size(), data_.get());
-	}
-
-    bool operator==(string_view rhs) const {
-        return string_view(data(), size()) == rhs;
-    }
-
-    char* data() const {
-        return data_.get();
-    }
-
-	operator string_view() const {
-		return string_view(data(), size());
-	}
-
-    size_t size() const {
-        return size_;
-    }
-
-    obj::persistent_ptr<char[]> data_;
-    size_t size_;
-};
-
-class dram_string_hasher {
-public:
-	using is_transparent = void;
-
-	size_t hash(const act_string &str) const
-	{
-		return std::hash<string_view>{}(string_view(str.data(), str.size()));
-	}
-
-	size_t hash(string_view str) const
-	{
-		return std::hash<string_view>{}(str);
-	}
-
-	template <typename M, typename U>
-	bool equal(const M &lhs, const U &rhs) const
-	{
-		return lhs == rhs;
-	}
-};
 
 using dram_index = tbb::concurrent_hash_map<string_view, string_view>;
 
@@ -191,7 +91,7 @@ struct pmem_type {
 		std::memset(reserved, 0, sizeof(reserved));
 	}
 
-	obj::persistent_ptr<std::pair<act_string, act_string>[]> str[16];
+	obj::persistent_ptr<std::pair<obj::string, obj::string>[]> str[16];
 
 	uint64_t reserved[8];
 };

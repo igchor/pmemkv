@@ -127,17 +127,13 @@ status new_map::put(string_view key, string_view value)
 
 	auto size = sizes[tid]++;
 
-	actions acts(pmpool, 8);
-
-	pmem->str[tid][size].first.assign(acts, key);
-	pmem->str[tid][size].second.assign(acts, value);
-
-	pmemobj_drain(pmpool.handle());
-	acts.publish();
+	obj::transaction::run(pmpool, [&]{
+		pmem->str[tid][size].first.assign(key.data(), key.size());
+		pmem->str[tid][size].second.assign(value.data(), value.size());
+	});
 
 	dram_index::accessor acc;
 	auto ret = index->insert(acc, key);
-
 	*const_cast<string_view*>(&acc->first) = string_view(pmem->str[tid][size].first);
 
 	acc->second = string_view(pmem->str[tid][size].second);
@@ -172,7 +168,7 @@ void new_map::Recover()
 				pmemobj_direct(*root_oid));
 
 			for (int i = 0; i < 16; i++) {
-				pmem->str[i] = obj::make_persistent<std::pair<act_string, act_string>[]>(this->dram_capacity / 16);
+				pmem->str[i] = obj::make_persistent<std::pair<obj::string, obj::string>[]>(this->dram_capacity / 16);
 				sizes[i] = 0;
 			}
 		});
