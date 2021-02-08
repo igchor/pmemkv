@@ -25,208 +25,173 @@
 
 #include <condition_variable>
 
+#include <libpmemobj/action_base.h>
+
 namespace pmem
 {
 namespace kv
 {
-namespace internal
-{
-namespace new_map
-{
 
-class key_equal {
+	class actions {
 public:
+    actions(obj::pool_base pop, size_t cnt = 1) : pop(pop) {
+        acts.reserve(cnt);
+    }
+
+    ~actions() {
+		if (acts.size() > 0)
+        	pmemobj_cancel(pop.handle(), acts.data(), acts.size());
+    }
+
+    template <typename T>
+    typename detail::pp_if_array<T>::type allocate(size_t cnt = 1) {
+        typedef typename detail::pp_array_type<T>::type I;
+
+        acts.emplace_back();
+        return pmemobj_reserve(pop.handle(), &acts.back(), sizeof(I) * cnt, 0);
+    }
+
+    // typename detail::pp_if_not_array<T>::type allocate() {
+    // }
+
+    void set_value(uint64_t* ptr, uint64_t value) {
+        acts.emplace_back();
+        pmemobj_set_value(pop.handle(), &acts.back(), ptr, value);
+    }
+
+	template <typename T>
+	void
+	free(obj::persistent_ptr<T> data) {
+		acts.emplace_back();
+		pmemobj_defer_free(pop.handle(), data.raw(), &acts.back());
+	}
+
+    void publish() {
+        if (pmemobj_publish(pop.handle(), acts.data(), acts.size()) != 0)
+            throw std::runtime_error(std::string("publish failed: ") + pmemobj_errormsg());
+
+		acts.clear();
+    }
+
+	obj::pool_base get_pool() { return pop; }
+
+private:
+    obj::pool_base pop;
+    std::vector<pobj_action> acts;
+};
+
+struct act_string {
+	act_string() {
+		data_ = nullptr;
+		size_ = 0;
+	}
+
+	// XXX: implement destruction
+
+    // act_string(actions &acts, string_view rhs) {
+	// 	if (rhs.size() == 0) {
+	// 		data_ = nullptr;
+	// 		size_ = 0;
+	// 		return;
+	// 	}
+
+    //     data_ = acts.allocate<char[]>(rhs.size());
+    //     size_ = rhs.size();
+
+	// 	pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+
+    //     // XXX: flush here?
+    // }
+
+    act_string& operator=(const act_string& rhs) = delete;
+
+	void assign(actions& acts, string_view rhs) {
+		if (rhs.size() == 0) {
+			acts.set_value(&data_.raw_ptr()->off, 0);
+			acts.set_value(&size_, 0);
+			return;
+		}
+
+		if (data_ != nullptr)
+			acts.free(data_);
+
+		auto v = acts.allocate<char[]>(rhs.size());
+		pmemobj_memcpy(acts.get_pool().handle(), v.get(), rhs.data(), rhs.size(), 0);
+
+		acts.set_value(&data_.raw_ptr()->off, v.raw().off);
+		acts.set_value(&data_.raw_ptr()->pool_uuid_lo, v.raw().pool_uuid_lo);
+		acts.set_value(&size_, rhs.size());
+	}
+
+	// void assign_init(actions& acts, string_view rhs) {
+	// 	if (rhs.size() == 0)
+	// 		return;
+
+	// 	assert(data_ == nullptr);
+
+	// 	data_ = acts.allocate<char[]>(rhs.size());;
+	// 	size_ = rhs.size();
+
+	// 	pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+	// }
+
+    bool operator==(string_view rhs) const {
+        return string_view(data(), size()) == rhs;
+    }
+
+    char* data() const {
+        return data_.get();
+    }
+
+	operator string_view() const {
+		return string_view(data(), size());
+	}
+
+    size_t size() const {
+        return size_;
+    }
+
+    obj::persistent_ptr<char[]> data_;
+    size_t size_;
+};
+
+class dram_string_hasher {
+public:
+	using is_transparent = void;
+
+	size_t hash(const act_string &str) const
+	{
+		return std::hash<string_view>{}(string_view(str.data(), str.size()));
+	}
+
+	size_t hash(string_view str) const
+	{
+		return std::hash<string_view>{}(str);
+	}
+
 	template <typename M, typename U>
-	bool operator()(const M &lhs, const U &rhs) const
+	bool equal(const M &lhs, const U &rhs) const
 	{
 		return lhs == rhs;
 	}
 };
 
-class string_hasher {
-	/* hash multiplier used by fibonacci hashing */
-	static const size_t hash_multiplier = 11400714819323198485ULL;
-
-public:
-	using transparent_key_equal = key_equal;
-
-	size_t operator()(const obj::string &str) const
-	{
-		return hash(str.c_str(), str.size());
-	}
-
-	size_t operator()(string_view str) const
-	{
-		return hash(str.data(), str.size());
-	}
-
-private:
-	size_t hash(const char *str, size_t size) const
-	{
-		size_t h = 0;
-		for (size_t i = 0; i < size; ++i) {
-			h = static_cast<size_t>(str[i]) ^ (h * hash_multiplier);
-		}
-		return h;
-	}
-};
-
-using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
-
-// using pmem_map_type =
-// pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
-// 					    pmem::obj::experimental::inline_string>;
-
-
-using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
-using pmem_remove_log_type = obj::vector<obj::string>;
-
-struct dram_map_type {
-	// using container_type = tbb::concurrent_hash_map<string_view, string_view,
-	// string_hasher>;
-	using container_type = tbb::concurrent_hash_map<std::string, std::string>;
-	using accessor_type = container_type::accessor;
-	using const_accessor_type = container_type::const_accessor;
-	// static constexpr uintptr_t tombstone = std::numeric_limits<uintptr_t>::max();
-	static constexpr const char *tombstone = "tombstone"; // XXX
-
-	dram_map_type()
-	{
-		is_mutable = true;
-	}
-
-	~dram_map_type()
-	{
-		// for (const auto &e : map) {
-		// 	 delete[] e.first.data();
-
-		// 	 if ((uint64_t) e.second.data() != dram_map_type::tombstone)
-		// 	 	delete[] e.second.data();
-		//  }
-	}
-
-	void put(string_view key, string_view value)
-	{
-		container_type::accessor acc;
-
-		// auto k = new char[key.size()];
-		// std::copy(key.begin(), key.data() + key.size(), k);
-
-		// auto v = (char*) tombstone;
-
-		// if ((uint64_t)value.data() != tombstone) {
-		// 	v = new char[value.size()];
-		// 	std::copy(value.begin(), value.data() + value.size(), v);
-		// }
-
-		// container_type::value_type kv{string_view(k, key.size()),
-		// string_view(v, value.size())};
-		container_type::value_type kv{std::string(key.data(), key.size()),
-					      std::string(value.data(), value.size())};
-
-		// XXX - make it exception safe (use C++...)
-		auto inserted = map.insert(acc, kv);
-		if (!inserted) {
-			// if ((uintptr_t) acc->second.data() != tombstone)
-			// 	delete[] acc->second.data();
-			// delete[] kv.first.data();
-
-			acc->second = kv.second;
-		}
-	}
-
-	enum class element_status { alive, removed, not_found };
-
-	element_status get(string_view key, container_type::const_accessor &acc)
-	{
-		auto found = map.find(acc, std::string(key.data(), key.size()));
-
-		if (found) {
-			if (acc->second == tombstone)
-				return element_status::removed;
-			else
-				return element_status::alive;
-		}
-
-		return element_status::not_found;
-	}
-
-	/* Element exists in the dram map (alive or tombstone) */
-	bool exists(string_view key)
-	{
-		return map.count(std::string(key.data(), key.size())) == 0 ? false : true;
-	}
-
-	// void remove(string_view key) {
-	// 	container_type::accessor acc;
-
-	// 	// auto k = new char[key.size()];
-	// 	// std::copy(key.begin(), key.data() + key.size(), k);
-
-	// 	// container_type::value_type kv{string_view(k, key.size()),
-	// string_view((const char*)tombstone, 0)}; 	container_type::value_type
-	// kv{std::string(key.data(), key.size()), std::string((const char*) tombstone,
-	// 0)};
-
-	// 	// XXX - make it exception safe (use C++...)
-	// 	auto inserted = map.insert(acc, kv);
-	// 	if (!inserted) {
-	// 		// if ((uintptr_t) acc->second.data() != tombstone)
-	// 		// 	delete[] acc->second.data();
-	// 		// delete[] kv.first.data();
-
-	// 		acc->second = kv.second;
-	// 	}
-	// }
-
-	container_type::iterator begin()
-	{
-		return map.begin();
-	}
-
-	container_type::iterator end()
-	{
-		return map.end();
-	}
-
-	size_t size() const
-	{
-		return map.size();
-	}
-
-	std::atomic<bool> is_mutable;
-
-	container_type map;
-};
-
-struct act_string {
-	PMEMoid data;
-	size_t size;
-};
+using dram_index = tbb::concurrent_hash_map<string_view, string_view>;
 
 struct pmem_type {
-	pmem_type() : map()
+	pmem_type()
 	{
 		std::memset(reserved, 0, sizeof(reserved));
 	}
 
-	// obj::vector<pmem_map_type> map;
-	pmem_map_type map;
-	pmem_insert_log_type insert_log[1024];
-	pmem_remove_log_type remove_log[1024];
-	obj::p<size_t> logs;
-
 	obj::persistent_ptr<std::pair<act_string, act_string>[]> str;
-
 	uint64_t reserved[8];
 };
 
 // static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
-} /* namespace new_map */
-} /* namespace internal */
 
-class new_map : public pmemobj_engine_base<internal::new_map::pmem_type> {
+class new_map : public pmemobj_engine_base<pmem_type> {
 	template <bool IsConst>
 	class iterator;
 
@@ -251,93 +216,20 @@ public:
 
 	status remove(string_view key) final;
 
-	void flush() final
-	{
-		std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
-
-		compaction_cv.wait(lock, [&] { return immutable_map == nullptr; });
-
-		/* If we end up here, neither mutable nor immutable map
-		 * can be changed concurrently. The only allowed
-		 * concurrent change is setting immutable_map to nullptr
-		 * (by the compaction thread). */
-		immutable_map = std::move(mutable_map);
-		mutable_map = std::make_unique<dram_map_type>();
-
-		auto t = start_bg_compaction();
-		lock.unlock();
-		t.join();
-	}
-
 private:
-	// static constexpr int SHARDS_NUM = 1024;
-
-	// static inline uint64_t
-	// mix(uint64_t h)
-	// {
-	// 	h ^= h >> 23;
-	// 	h *= 0x2127599bf4325c37ULL;
-	// 	return h ^ h >> 47;
-	// }
-
-	// uint64_t shard(string_view key) {
-	// 	const uint64_t    m = 0x880355f21e6d1965ULL;
-	// 	const uint64_t *pos = (const uint64_t *)key.data();
-	// 	const uint64_t *end = pos + (key.size() / 8);
-	// 	uint64_t h = key.size() * m;
-
-	// 	while (pos != end)
-	// 		h = (h ^ mix(*pos++)) * m;
-
-	// 	if (key.size() & 7) {
-	// 		uint64_t shift = (key.size() & 7) * 8;
-	// 		uint64_t mask = (1ULL << shift) - 1;
-	// 		uint64_t v = htole64(*pos) & mask;
-	// 		h = (h ^ mix(v)) * m;
-	// 	}
-
-	// 	return mix(h) & (SHARDS_NUM - 1);
-	// }
-
-	/// using container_type = obj::vector<internal::new_map::pmem_map_type>;
-	using container_type = internal::new_map::pmem_map_type;
-	using dram_map_type = internal::new_map::dram_map_type;
-	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
-	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
-	using pmem_type = internal::new_map::pmem_type;
-
-	std::thread start_bg_compaction();
-	bool dram_has_space(std::unique_ptr<dram_map_type> &map);
+	/// using container_type = obj::vector<pmem_map_type>;
+	//using pmem_type = pmem_type;
 
 	void Recover();
 
-	container_type *container;
+	size_t dram_capacity = 1024;
+
+	std::atomic<size_t> cnt = 0;
+
 	pmem_type *pmem;
 	std::unique_ptr<internal::config> config;
 
-	using mutex_type = std::shared_timed_mutex;
-	using unique_lock_type = std::unique_lock<mutex_type>;
-	using shared_lock_type = std::shared_lock<mutex_type>;
-
-	// std::vector<mutex_type> mtxs;
-
-	// static constexpr uint64_t dram_capacity = 1024; /// XXX: parameterize this
-
-	uint64_t dram_capacity = 1024;
-
-	uint64_t grainsize = 128;
-
-	std::atomic<size_t> cnt;
-
-	std::unique_ptr<dram_map_type> mutable_map;
-	std::unique_ptr<dram_map_type> immutable_map;
-
-	std::shared_timed_mutex compaction_mtx;
-	std::shared_timed_mutex iteration_mtx;
-
-	std::condition_variable_any compaction_cv;
-
-	tbb::concurrent_hash_map<size_t, size_t> map11;
+	std::unique_ptr<dram_index> index;
 };
 
 } /* namespace kv */
