@@ -39,8 +39,10 @@ public:
     }
 
     ~actions() {
-		if (acts.size() > 0)
-        	pmemobj_cancel(pop.handle(), acts.data(), acts.size());
+
+		// XXX - for test
+		//if (acts.size() > 0)
+        //	pmemobj_cancel(pop.handle(), acts.data(), acts.size());
     }
 
     template <typename T>
@@ -88,20 +90,21 @@ struct act_string {
 
 	// XXX: implement destruction
 
-    // act_string(actions &acts, string_view rhs) {
-	// 	if (rhs.size() == 0) {
-	// 		data_ = nullptr;
-	// 		size_ = 0;
-	// 		return;
-	// 	}
+    act_string(actions &acts, string_view rhs) {
+		if (rhs.size() == 0) {
+			data_ = nullptr;
+			size_ = 0;
+			return;
+		}
 
-    //     data_ = acts.allocate<char[]>(rhs.size());
-    //     size_ = rhs.size();
+        data_ = acts.allocate<char[]>(rhs.size());
+        size_ = rhs.size();
 
-	// 	pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+		//pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+		std::copy(rhs.data(), rhs.data() + rhs.size(), data_.get());
 
-    //     // XXX: flush here?
-    // }
+        // XXX: flush here?
+    }
 
     act_string& operator=(const act_string& rhs) = delete;
 
@@ -123,17 +126,21 @@ struct act_string {
 		acts.set_value(&size_, rhs.size());
 	}
 
-	// void assign_init(actions& acts, string_view rhs) {
-	// 	if (rhs.size() == 0)
-	// 		return;
+	void assign_init(actions& acts, string_view rhs) {
+		if (rhs.size() == 0) {
+			data_ = nullptr;
+			size_ = 0;
+			return;
+		}
 
-	// 	assert(data_ == nullptr);
+		assert(data_ == nullptr);
 
-	// 	data_ = acts.allocate<char[]>(rhs.size());;
-	// 	size_ = rhs.size();
+		data_ = acts.allocate<char[]>(rhs.size());;
+		size_ = rhs.size();
 
-	// 	pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
-	// }
+		//pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+		std::copy(rhs.data(), rhs.data() + rhs.size(), data_.get());
+	}
 
     bool operator==(string_view rhs) const {
         return string_view(data(), size()) == rhs;
@@ -184,7 +191,8 @@ struct pmem_type {
 		std::memset(reserved, 0, sizeof(reserved));
 	}
 
-	obj::persistent_ptr<std::pair<act_string, act_string>[]> str;
+	obj::persistent_ptr<std::pair<act_string, act_string>[]> str[16];
+
 	uint64_t reserved[8];
 };
 
@@ -225,6 +233,8 @@ private:
 	size_t dram_capacity = 1024;
 
 	std::atomic<size_t> cnt = 0;
+
+	size_t sizes[16];
 
 	pmem_type *pmem;
 	std::unique_ptr<internal::config> config;

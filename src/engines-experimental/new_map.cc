@@ -121,12 +121,16 @@ status new_map::put(string_view key, string_view value)
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
 
-	auto idx = cnt.fetch_add(1, std::memory_order_relaxed); // XXX: memory order?
+	static thread_local size_t tid = cnt.fetch_add(1, std::memory_order_relaxed);
+
+	assert(tid < 16);
+
+	auto size = sizes[tid]++;
 
 	actions acts(pmpool, 8);
 
-	pmem->str[idx].first.assign(acts, key);
-	pmem->str[idx].second.assign(acts, value);
+	pmem->str[tid][size].first.assign(acts, key);
+	pmem->str[tid][size].second.assign(acts, value);
 
 	pmemobj_drain(pmpool.handle());
 	acts.publish();
@@ -134,9 +138,9 @@ status new_map::put(string_view key, string_view value)
 	dram_index::accessor acc;
 	auto ret = index->insert(acc, key);
 
-	*const_cast<string_view*>(&acc->first) = string_view(pmem->str[idx].first);
+	*const_cast<string_view*>(&acc->first) = string_view(pmem->str[tid][size].first);
 
-	acc->second = string_view(pmem->str[idx].second);
+	acc->second = string_view(pmem->str[tid][size].second);
 
 	return status::OK;
 }
@@ -167,7 +171,10 @@ void new_map::Recover()
 			pmem = static_cast<pmem_type *>(
 				pmemobj_direct(*root_oid));
 
-			pmem->str = obj::make_persistent<std::pair<act_string, act_string>[]>(this->dram_capacity);
+			for (int i = 0; i < 16; i++) {
+				pmem->str[i] = obj::make_persistent<std::pair<act_string, act_string>[]>(this->dram_capacity / 16);
+				sizes[i] = 0;
+			}
 		});
 	}
 
