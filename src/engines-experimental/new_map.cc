@@ -126,7 +126,8 @@ status new_map::put(string_view key, string_view value)
 	auto k = act_string(acts, key);
 
 	dram_index::accessor acc;
-	auto ret = index->insert(acc, string_view(k));
+	auto ret = index->insert(acc, key);
+	*const_cast<string_view*>(&acc->first) = k;
 	if (!ret) {
 		acts.free(obj::persistent_ptr<act_string>(pmemobj_oid(acc->second.data())));
 	}
