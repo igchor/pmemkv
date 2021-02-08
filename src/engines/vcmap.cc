@@ -34,9 +34,7 @@ static uint64_t get_size(internal::config &cfg)
 }
 
 vcmap::vcmap(std::unique_ptr<internal::config> cfg)
-    : kv_allocator(get_path(*cfg), get_size(*cfg)),
-      ch_allocator(kv_allocator),
-      pmem_kv_container(std::scoped_allocator_adaptor<kv_allocator_t>(kv_allocator))
+    :pmem_kv_container()
 {
 	LOG("Started ok");
 }
@@ -77,9 +75,8 @@ status vcmap::exists(string_view key)
 {
 	LOG("exists for key=" << std::string(key.data(), key.size()));
 	map_t::const_accessor result;
-	// XXX - do not create temporary string
 	const bool result_found = pmem_kv_container.find(
-		result, pmem_string(key.data(), key.size(), ch_allocator));
+		result, key);
 	return (result_found ? status::OK : status::NOT_FOUND);
 }
 
@@ -87,9 +84,8 @@ status vcmap::get(string_view key, get_v_callback *callback, void *arg)
 {
 	LOG("get key=" << std::string(key.data(), key.size()));
 	map_t::const_accessor result;
-	// XXX - do not create temporary string
 	const bool result_found = pmem_kv_container.find(
-		result, pmem_string(key.data(), key.size(), ch_allocator));
+		result, key);
 	if (!result_found) {
 		LOG("  key not found");
 		return status::NOT_FOUND;
@@ -104,15 +100,10 @@ status vcmap::put(string_view key, string_view value)
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
 
-	map_t::value_type kv_pair{// XXX - do not create temporary string
-				  pmem_string(key.data(), key.size(), ch_allocator),
-				  pmem_string(value.data(), value.size(), ch_allocator)};
-	bool result = pmem_kv_container.insert(kv_pair);
-	if (!result) {
-		map_t::accessor result_found;
-		pmem_kv_container.find(result_found, kv_pair.first);
-		result_found->second = kv_pair.second;
-	}
+	map_t::accessor acc;
+	pmem_kv_container.insert(acc, key);
+	acc->second.assign(value.data(), value.size());
+		
 	return status::OK;
 }
 
@@ -120,29 +111,27 @@ status vcmap::remove(string_view key)
 {
 	LOG("remove key=" << std::string(key.data(), key.size()));
 
-	// XXX - do not create temporary string
-	size_t erased = pmem_kv_container.erase(
-		pmem_string(key.data(), key.size(), ch_allocator));
+	size_t erased = pmem_kv_container.erase(key);
 	return (erased == 1) ? status::OK : status::NOT_FOUND;
 }
 
 internal::iterator_base *vcmap::new_iterator()
 {
-	return new vcmap_iterator<false>{&pmem_kv_container, &ch_allocator};
+	return new vcmap_iterator<false>{&pmem_kv_container};
 }
 
 internal::iterator_base *vcmap::new_const_iterator()
 {
-	return new vcmap_iterator<true>{&pmem_kv_container, &ch_allocator};
+	return new vcmap_iterator<true>{&pmem_kv_container};
 }
 
-vcmap::vcmap_iterator<true>::vcmap_iterator(container_type *c, ch_allocator_t *ca)
-    : container(c), ch_allocator(ca)
+vcmap::vcmap_iterator<true>::vcmap_iterator(container_type *c)
+    : container(c)
 {
 }
 
-vcmap::vcmap_iterator<false>::vcmap_iterator(container_type *c, ch_allocator_t *ca)
-    : vcmap::vcmap_iterator<true>(c, ca)
+vcmap::vcmap_iterator<false>::vcmap_iterator(container_type *c)
+    : vcmap::vcmap_iterator<true>(c)
 {
 }
 
@@ -150,7 +139,7 @@ status vcmap::vcmap_iterator<true>::seek(string_view key)
 {
 	init_seek();
 
-	if (container->find(acc_, pmem_string(key.data(), key.size(), *ch_allocator)))
+	if (container->find(acc_, pmem_string(key.data(), key.size())))
 		return status::OK;
 
 	return status::NOT_FOUND;
