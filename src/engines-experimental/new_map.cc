@@ -121,7 +121,7 @@ status new_map::put(string_view key, string_view value)
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
 
-	actions acts(pmpool, 2);
+	static thread_local actions acts(pmpool, 1024);
 
 	auto k = act_string(acts, key);
 
