@@ -39,8 +39,10 @@ public:
     }
 
     ~actions() {
-		if (acts.size() > 0)
-        	pmemobj_cancel(pop.handle(), acts.data(), acts.size());
+
+		// XXX - for test
+		//if (acts.size() > 0)
+        //	pmemobj_cancel(pop.handle(), acts.data(), acts.size());
     }
 
     template <typename T>
@@ -88,52 +90,55 @@ struct act_string {
 
 	// XXX: implement destruction
 
-    // act_string(actions &acts, string_view rhs) {
-	// 	if (rhs.size() == 0) {
-	// 		data_ = nullptr;
-	// 		size_ = 0;
-	// 		return;
-	// 	}
-
-    //     data_ = acts.allocate<char[]>(rhs.size());
-    //     size_ = rhs.size();
-
-	// 	pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
-
-    //     // XXX: flush here?
-    // }
-
-    act_string& operator=(const act_string& rhs) = delete;
-
-	void assign(actions& acts, string_view rhs) {
+    act_string(actions &acts, string_view rhs) {
 		if (rhs.size() == 0) {
-			acts.set_value(&data_.raw_ptr()->off, 0);
-			acts.set_value(&size_, 0);
+			data_ = nullptr;
+			size_ = 0;
 			return;
 		}
 
-		if (data_ != nullptr)
-			acts.free(data_);
+        data_ = acts.allocate<char[]>(rhs.size());
+        size_ = rhs.size();
 
-		auto v = acts.allocate<char[]>(rhs.size());
-		pmemobj_memcpy(acts.get_pool().handle(), v.get(), rhs.data(), rhs.size(), 0);
+		pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
 
-		acts.set_value(&data_.raw_ptr()->off, v.raw().off);
-		acts.set_value(&data_.raw_ptr()->pool_uuid_lo, v.raw().pool_uuid_lo);
-		acts.set_value(&size_, rhs.size());
-	}
+        // XXX: flush here?
+    }
 
-	// void assign_init(actions& acts, string_view rhs) {
-	// 	if (rhs.size() == 0)
+    act_string& operator=(const act_string& rhs) = delete;
+
+	// void assign(actions& acts, string_view rhs) {
+	// 	if (rhs.size() == 0) {
+	// 		acts.set_value(&data_.raw_ptr()->off, 0);
+	// 		acts.set_value(&size_, 0);
 	// 		return;
+	// 	}
 
-	// 	assert(data_ == nullptr);
+	// 	if (data_ != nullptr)
+	// 		acts.free(data_);
 
-	// 	data_ = acts.allocate<char[]>(rhs.size());;
-	// 	size_ = rhs.size();
+	// 	auto v = acts.allocate<char[]>(rhs.size());
+	// 	pmemobj_memcpy(acts.get_pool().handle(), v.get(), rhs.data(), rhs.size(), 0);
 
-	// 	pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+	// 	acts.set_value(&data_.raw_ptr()->off, v.raw().off);
+	// 	acts.set_value(&data_.raw_ptr()->pool_uuid_lo, v.raw().pool_uuid_lo);
+	// 	acts.set_value(&size_, rhs.size());
 	// }
+
+	void assign_init(actions& acts, string_view rhs) {
+		if (rhs.size() == 0) {
+			data_ = nullptr;
+			size_ = 0;
+			return;
+		}
+
+		assert(data_ == nullptr);
+
+		data_ = acts.allocate<char[]>(rhs.size());;
+		size_ = rhs.size();
+
+		pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+	}
 
     bool operator==(string_view rhs) const {
         return string_view(data(), size()) == rhs;
