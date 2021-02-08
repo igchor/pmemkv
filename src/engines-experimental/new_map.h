@@ -77,6 +77,7 @@ using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_
 // pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
 // 					    pmem::obj::experimental::inline_string>;
 
+
 using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
 using pmem_remove_log_type = obj::vector<obj::string>;
 
@@ -198,6 +199,11 @@ struct dram_map_type {
 	container_type map;
 };
 
+struct act_string {
+	PMEMoid data;
+	size_t size;
+};
+
 struct pmem_type {
 	pmem_type() : map()
 	{
@@ -209,6 +215,9 @@ struct pmem_type {
 	pmem_insert_log_type insert_log[1024];
 	pmem_remove_log_type remove_log[1024];
 	obj::p<size_t> logs;
+
+	obj::persistent_ptr<std::pair<act_string, act_string>[]> str;
+
 	uint64_t reserved[8];
 };
 
@@ -318,6 +327,8 @@ private:
 
 	uint64_t grainsize = 128;
 
+	std::atomic<size_t> cnt;
+
 	std::unique_ptr<dram_map_type> mutable_map;
 	std::unique_ptr<dram_map_type> immutable_map;
 
@@ -325,6 +336,8 @@ private:
 	std::shared_timed_mutex iteration_mtx;
 
 	std::condition_variable_any compaction_cv;
+
+	tbb::concurrent_hash_map<size_t, size_t> map11;
 };
 
 } /* namespace kv */
