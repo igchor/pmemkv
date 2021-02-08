@@ -132,7 +132,11 @@ status new_map::put(string_view key, string_view value)
 		acts.free(obj::persistent_ptr<act_string>(pmemobj_oid(acc->second.data())));
 	}
 
-	acc->second = act_string(acts, value);
+	auto v = act_string(acts, value);
+	acc->second = v;
+
+	// pmemobj_flush(pmpool.handle(), k.data(), key.size());
+	// pmemobj_flush(pmpool.handle(), v.data(), value.size());
 
 	return status::OK;
 }

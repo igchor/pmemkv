@@ -100,7 +100,8 @@ struct act_string {
         data_ = acts.allocate<char[]>(rhs.size());
         size_ = rhs.size();
 
-		pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+		//pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+		std::copy(rhs.data(), rhs.data() + rhs.size(), data_.get());
 
         // XXX: flush here?
     }
@@ -137,7 +138,8 @@ struct act_string {
 		data_ = acts.allocate<char[]>(rhs.size());;
 		size_ = rhs.size();
 
-		pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+		//pmemobj_memcpy(acts.get_pool().handle(), data_.get(), rhs.data(), rhs.size(), 0);
+		std::copy(rhs.data(), rhs.data() + rhs.size(), data_.get());
 	}
 
     bool operator==(string_view rhs) const {
