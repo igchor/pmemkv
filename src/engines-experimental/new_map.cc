@@ -132,7 +132,10 @@ status new_map::put(string_view key, string_view value)
 	acts.publish();
 
 	dram_index::accessor acc;
-	auto ret = index->insert(acc, string_view(pmem->str[idx].first));
+	auto ret = index->insert(acc, key);
+
+	*const_cast<string_view*>(&acc->first) = string_view(pmem->str[idx].first);
+
 	acc->second = string_view(pmem->str[idx].second);
 
 	return status::OK;
