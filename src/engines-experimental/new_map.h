@@ -199,16 +199,17 @@ public:
 
 	void flush() final
 	{
-		std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+		//std::unique_lock<std::shared_timed_mutex> lock(compaction_mtx);
+		std::unique_lock<std::mutex> lock(compaction_mtx);
 
-		compaction_cv.wait(lock, [&] { return immutable_map == nullptr; });
+		compaction_cv.wait(lock, [&] { return std::atomic_load_explicit(&immutable_map, std::memory_order_acquire) == nullptr; });
 
 		/* If we end up here, neither mutable nor immutable map
 		 * can be changed concurrently. The only allowed
 		 * concurrent change is setting immutable_map to nullptr
 		 * (by the compaction thread). */
-		immutable_map = std::move(mutable_map);
-		mutable_map = std::make_unique<dram_map_type>();
+			std::atomic_store(&immutable_map, std::atomic_load(&mutable_map));
+			std::atomic_store(&mutable_map, std::make_shared<dram_map_type>());
 
 		auto t = start_bg_compaction();
 		lock.unlock();
@@ -222,7 +223,7 @@ private:
 	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
 
 	std::thread start_bg_compaction();
-	bool dram_has_space(std::unique_ptr<dram_map_type> &map);
+	bool dram_has_space(std::shared_ptr<dram_map_type> &map);
 
 	void Recover();
 
@@ -241,13 +242,13 @@ private:
 
 	uint64_t dram_capacity = 1024;
 
-	std::unique_ptr<dram_map_type> mutable_map;
-	std::unique_ptr<dram_map_type> immutable_map;
+	std::shared_ptr<dram_map_type> mutable_map;
+	std::shared_ptr<dram_map_type> immutable_map;
 
-	std::shared_timed_mutex compaction_mtx;
+	std::mutex compaction_mtx;
 	std::shared_timed_mutex iteration_mtx;
 
-	std::condition_variable_any compaction_cv;
+	std::condition_variable compaction_cv;
 };
 
 } /* namespace kv */
