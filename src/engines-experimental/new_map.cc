@@ -20,7 +20,7 @@ new_map::new_map(std::unique_ptr<internal::config> cfg)
 new_map::~new_map()
 {
 	std::unique_lock<std::mutex> sh_lock(compaction_mtx);
-	compaction_cv.wait(sh_lock, [&] { return std::atomic_load_explicit(&immutable_map, std::memory_order_acquire) == nullptr; });
+	compaction_cv.wait(sh_lock, [&] { return *immutable_map.load() == nullptr; });
 
 	LOG("Stopped ok");
 }
@@ -75,8 +75,8 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 
 	std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+	auto imm = *immutable_map.load(std::memory_order_acquire);
+	auto mut = *mutable_map.load(std::memory_order_acquire);
 
 	auto mut_pred = [](string_view, string_view v) {
 		return v != dram_map_type::tombstone;
@@ -118,8 +118,8 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	std::shared_lock<std::shared_timed_mutex> it_lock(iteration_mtx);
 	// std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
-	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+	auto imm = *immutable_map.load(std::memory_order_acquire);
+	auto mut = *mutable_map.load(std::memory_order_acquire);
 
 	{
 		dram_map_type::const_accessor_type acc;
@@ -163,8 +163,10 @@ std::thread new_map::start_bg_compaction()
 		/* This lock synchronizes with get_all and get/put methods which can rehash on lookup */
 		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-	auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-	auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+		auto imm_ptr = immutable_map.load(std::memory_order_acquire);
+
+		auto imm = *imm_ptr;
+		auto mut = *mutable_map.load(std::memory_order_acquire);
 
 		assert(imm != nullptr);
 
@@ -192,7 +194,8 @@ std::thread new_map::start_bg_compaction()
 
 		{
 			// std::unique_lock<std::shared_timed_mutex> lll(compaction_mtx);
-			std::atomic_store(&immutable_map, std::shared_ptr<dram_map_type>(nullptr));
+			immutable_map.store(new std::shared_ptr<dram_map_type>(nullptr));
+			delete imm_ptr;
 		}
 
 		compaction_cv.notify_all(); // -> one?
@@ -210,8 +213,8 @@ status new_map::put(string_view key, string_view value)
 		       << ", value.size=" << std::to_string(value.size()));
 
 	do {
-		auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
-		auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+		auto imm = *immutable_map.load(std::memory_order_acquire);
+		auto mut = *mutable_map.load(std::memory_order_acquire);
 
 		if (dram_has_space(mut)) {
 			mut->put(key, value);
@@ -222,21 +225,22 @@ status new_map::put(string_view key, string_view value)
 			std::unique_lock<std::mutex> compaction_lock(compaction_mtx);
 
 			compaction_cv.wait(compaction_lock,
-					   [&] { return std::atomic_load_explicit(&immutable_map, std::memory_order_acquire) == nullptr; });
+					   [&] { return *immutable_map.load(std::memory_order_acquire) == nullptr; });
 
-			auto mut = std::atomic_load_explicit(&mutable_map, std::memory_order_acquire);
+			auto mut_ptr = mutable_map.load(std::memory_order_acquire);
+			auto mut = *mut_ptr;
 
 			if (dram_has_space(mut))
 				continue;
 
-			auto imm = std::atomic_load_explicit(&immutable_map, std::memory_order_acquire);
+			auto imm = *immutable_map.load(std::memory_order_acquire);
 
 			assert(imm == nullptr);
 
-			std::atomic_store(&immutable_map, mut);
-			std::atomic_store(&mutable_map, std::make_shared<dram_map_type>());
+			immutable_map.store(mut_ptr);
+			mutable_map.store(new std::shared_ptr<dram_map_type>(std::make_shared<dram_map_type>()));
 
-			assert(std::atomic_load_explicit(&immutable_map, std::memory_order_acquire) != nullptr);
+			assert(*immutable_map.load(std::memory_order_acquire) != nullptr);
 
 			start_bg_compaction().detach();
 		}
@@ -280,8 +284,8 @@ void new_map::Recover()
 
 	// mtxs = std::vector<mutex_type>(SHARDS_NUM);
 
-	mutable_map = std::make_unique<dram_map_type>();
-	immutable_map = nullptr;
+	mutable_map = new std::shared_ptr<dram_map_type>(std::make_unique<dram_map_type>());
+	immutable_map = new std::shared_ptr<dram_map_type>(nullptr);
 
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
 	if (dram_capacity)
