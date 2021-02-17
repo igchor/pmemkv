@@ -6,18 +6,18 @@
 #include "../iterator.h"
 #include "../pmemobj_engine.h"
 
-#include <libpmemobj++/persistent_ptr.hpp>
+#include <libpmemobj++/container/concurrent_hash_map.hpp>
+#include <libpmemobj++/container/string.hpp>
+#include <libpmemobj++/detail/pair.hpp>
 #include <libpmemobj++/experimental/inline_string.hpp>
 #include <libpmemobj++/experimental/radix_tree.hpp>
-#include <libpmemobj++/detail/pair.hpp>
-#include <libpmemobj++/container/string.hpp>
-#include <libpmemobj++/container/concurrent_hash_map.hpp>
+#include <libpmemobj++/persistent_ptr.hpp>
 
 #include <tbb/concurrent_hash_map.h>
 
+#include <condition_variable>
 #include <endian.h>
 #include <shared_mutex>
-#include <condition_variable>
 
 namespace pmem
 {
@@ -96,13 +96,18 @@ using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>
 using pmem_remove_log_type = obj::vector<obj::string>;
 
 struct dram_map_type {
-	using container_type = tbb::concurrent_hash_map<std::string, std::string, dram_string_hasher>;
+	using container_type =
+		tbb::concurrent_hash_map<std::string, std::string, dram_string_hasher>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
-	
+
 	static constexpr const char *tombstone = "tombstone"; // XXX
 
 	dram_map_type()
+	{
+	}
+
+	dram_map_type(size_t n) : map(n)
 	{
 	}
 
@@ -152,6 +157,8 @@ struct dram_map_type {
 	}
 
 	container_type map;
+
+	std::atomic<std::size_t> mutable_count = 0;
 };
 
 struct pmem_type {
@@ -241,13 +248,18 @@ private:
 
 	uint64_t dram_capacity = 1024;
 
-	std::atomic<std::shared_ptr<dram_map_type>*> mutable_map;
-	std::atomic<std::shared_ptr<dram_map_type>*> immutable_map;
+	std::atomic<std::shared_ptr<dram_map_type> *> mutable_map;
+	std::atomic<std::shared_ptr<dram_map_type> *> immutable_map;
 
 	std::mutex compaction_mtx;
 	std::shared_timed_mutex iteration_mtx;
 
 	std::condition_variable compaction_cv;
+
+	std::mutex bg_mtx;
+	std::condition_variable bg_cv;
+
+	std::atomic<bool> is_shutting_down = false;
 };
 
 } /* namespace kv */

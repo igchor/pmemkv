@@ -19,6 +19,9 @@ new_map::new_map(std::unique_ptr<internal::config> cfg)
 
 new_map::~new_map()
 {
+	is_shutting_down.store(true);
+	bg_cv.notify_one();
+
 	std::unique_lock<std::mutex> sh_lock(compaction_mtx);
 	compaction_cv.wait(sh_lock, [&] { return *immutable_map.load() == nullptr; });
 
@@ -75,8 +78,8 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 
 	std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-	auto imm = *immutable_map.load(std::memory_order_acquire);
 	auto mut = *mutable_map.load(std::memory_order_acquire);
+	auto imm = *immutable_map.load(std::memory_order_acquire);
 
 	auto mut_pred = [](string_view, string_view v) {
 		return v != dram_map_type::tombstone;
@@ -118,8 +121,8 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	std::shared_lock<std::shared_timed_mutex> it_lock(iteration_mtx);
 	// std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
-	auto imm = *immutable_map.load(std::memory_order_acquire);
 	auto mut = *mutable_map.load(std::memory_order_acquire);
+	auto imm = *immutable_map.load(std::memory_order_acquire);
 
 	{
 		dram_map_type::const_accessor_type acc;
@@ -160,13 +163,17 @@ std::thread new_map::start_bg_compaction()
 {
 	// XXX: create thread pool
 	return std::thread([&] {
-		/* This lock synchronizes with get_all and get/put methods which can rehash on lookup */
+		/* This lock synchronizes with get_all and get/put methods which can
+		 * rehash on lookup */
 		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-		auto imm_ptr = immutable_map.load(std::memory_order_acquire);
+		std::shared_ptr<dram_map_type> imm, mut, *imm_ptr;
 
-		auto imm = *imm_ptr;
-		auto mut = *mutable_map.load(std::memory_order_acquire);
+		//	do {
+		imm_ptr = immutable_map.load(std::memory_order_acquire);
+		imm = *imm_ptr;
+		mut = *mutable_map.load(std::memory_order_acquire);
+		//} while (imm->mutable_count.load(std::memory_order_relaxed) > 0);
 
 		assert(imm != nullptr);
 
@@ -178,6 +185,10 @@ std::thread new_map::start_bg_compaction()
 				container->emplace(e.first, e.second);
 			}
 			elements++;
+		}
+
+		if (elements != imm->size()) {
+			std::cout << elements << " " << imm->size() << std::endl;
 		}
 
 		assert(elements == imm->size());
@@ -213,36 +224,28 @@ status new_map::put(string_view key, string_view value)
 		       << ", value.size=" << std::to_string(value.size()));
 
 	do {
-		auto imm = *immutable_map.load(std::memory_order_acquire);
 		auto mut = *mutable_map.load(std::memory_order_acquire);
+		auto imm = *immutable_map.load(std::memory_order_acquire);
+
+		mut->mutable_count.fetch_add(std::memory_order_relaxed); // XXX: order?
 
 		if (dram_has_space(mut)) {
 			mut->put(key, value);
+
+			mut->mutable_count.fetch_sub(std::memory_order_release);
 			return status::OK;
 		} else {
-			// Do it in a single background thread (maybe notify this bg thread using notify_one()?)
-			// to avoid blocking several threads here
+			bg_cv.notify_one();
+
+			// Do it in a single background thread (maybe notify this bg
+			// thread using notify_one()?) to avoid blocking several threads
+			// here
 			std::unique_lock<std::mutex> compaction_lock(compaction_mtx);
 
-			compaction_cv.wait(compaction_lock,
-					   [&] { return *immutable_map.load(std::memory_order_acquire) == nullptr; });
-
-			auto mut_ptr = mutable_map.load(std::memory_order_acquire);
-			auto mut = *mut_ptr;
-
-			if (dram_has_space(mut))
-				continue;
-
-			auto imm = *immutable_map.load(std::memory_order_acquire);
-
-			assert(imm == nullptr);
-
-			immutable_map.store(mut_ptr);
-			mutable_map.store(new std::shared_ptr<dram_map_type>(std::make_shared<dram_map_type>()));
-
-			assert(*immutable_map.load(std::memory_order_acquire) != nullptr);
-
-			start_bg_compaction().detach();
+			compaction_cv.wait(compaction_lock, [&] {
+				return dram_has_space(
+					*mutable_map.load(std::memory_order_acquire));
+			});
 		}
 	} while (true);
 
@@ -284,7 +287,8 @@ void new_map::Recover()
 
 	// mtxs = std::vector<mutex_type>(SHARDS_NUM);
 
-	mutable_map = new std::shared_ptr<dram_map_type>(std::make_unique<dram_map_type>());
+	mutable_map =
+		new std::shared_ptr<dram_map_type>(std::make_unique<dram_map_type>());
 	immutable_map = new std::shared_ptr<dram_map_type>(nullptr);
 
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
@@ -292,6 +296,79 @@ void new_map::Recover()
 		this->dram_capacity = std::stoi(dram_capacity);
 
 	container = new container_type();
+
+	std::thread([&] {
+		while (true) {
+			std::unique_lock<std::mutex> lock(bg_mtx);
+			bg_cv.wait(lock, [&] {
+				return !dram_has_space(*mutable_map.load(
+					       std::memory_order_acquire)) ||
+					is_shutting_down.load();
+			});
+
+			auto mut_ptr = mutable_map.load(std::memory_order_acquire);
+			auto mut = *mut_ptr;
+			auto imm = *immutable_map.load(std::memory_order_acquire);
+
+			assert(imm == nullptr);
+
+			immutable_map.store(mut_ptr);
+			mutable_map.store(new std::shared_ptr<dram_map_type>(
+				std::make_shared<dram_map_type>(this->dram_capacity *
+								2)));
+
+			assert(*immutable_map.load(std::memory_order_acquire) != nullptr);
+
+			std::unique_lock<std::shared_timed_mutex> it_lock(iteration_mtx);
+
+			auto imm_ptr = immutable_map.load(std::memory_order_acquire);
+
+			/// XXX: not necessary
+			imm = *imm_ptr;
+			mut = *mutable_map.load(std::memory_order_acquire);
+
+			assert(imm != nullptr);
+
+			size_t elements = 0;
+			for (const auto &e : *imm) {
+				if (e.second == dram_map_type::tombstone) {
+					container->erase(e.first);
+				} else {
+					container->emplace(e.first, e.second);
+				}
+				elements++;
+			}
+
+			if (elements != imm->size()) {
+				std::cout << elements << " " << imm->size() << std::endl;
+			}
+
+			assert(elements == imm->size());
+
+			// XXX debug
+#ifndef NDEBUG
+			for (const auto &e : *imm) {
+				if (e.second == dram_map_type::tombstone) {
+					assert(container->count(e.first) == 0);
+				} else
+					assert(container->count(e.first) == 1);
+			}
+#endif
+
+			{
+				// std::unique_lock<std::shared_timed_mutex>
+				// lll(compaction_mtx);
+				immutable_map.store(
+					new std::shared_ptr<dram_map_type>(nullptr));
+				delete imm_ptr;
+			}
+
+			compaction_cv.notify_all(); // -> one?
+
+			if (is_shutting_down.load())
+				return;
+		}
+	}).detach();
 }
 
 } // namespace kv
