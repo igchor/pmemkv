@@ -228,8 +228,10 @@ private:
 	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
 	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
 
+	using shared_ptr_type = std::shared_ptr<dram_map_type>;
+
 	std::thread start_bg_compaction();
-	bool dram_has_space(std::shared_ptr<dram_map_type> &map);
+	bool dram_has_space(shared_ptr_type &map);
 
 	void Recover();
 
@@ -248,8 +250,8 @@ private:
 
 	uint64_t dram_capacity = 1024;
 
-	std::atomic<std::shared_ptr<dram_map_type> *> mutable_map;
-	std::atomic<std::shared_ptr<dram_map_type> *> immutable_map;
+	std::atomic<shared_ptr_type *> mutable_map;
+	std::atomic<shared_ptr_type *> immutable_map;
 
 	std::mutex compaction_mtx;
 	std::shared_timed_mutex iteration_mtx;
@@ -260,6 +262,9 @@ private:
 	std::condition_variable bg_cv;
 
 	std::atomic<bool> is_shutting_down = false;
+
+	std::array<dram_map_type*, 10> to_free;
+	std::atomic<int> to_free_size = 0;
 };
 
 } /* namespace kv */

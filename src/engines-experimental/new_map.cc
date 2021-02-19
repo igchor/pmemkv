@@ -167,13 +167,13 @@ std::thread new_map::start_bg_compaction()
 		 * rehash on lookup */
 		std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
-		std::shared_ptr<dram_map_type> imm, mut, *imm_ptr;
+		shared_ptr_type imm, mut, *imm_ptr;
 
-		//	do {
+			do {
 		imm_ptr = immutable_map.load(std::memory_order_acquire);
 		imm = *imm_ptr;
 		mut = *mutable_map.load(std::memory_order_acquire);
-		//} while (imm->mutable_count.load(std::memory_order_relaxed) > 0);
+		} while (imm->mutable_count.load(std::memory_order_relaxed) > 0);
 
 		assert(imm != nullptr);
 
@@ -205,7 +205,7 @@ std::thread new_map::start_bg_compaction()
 
 		{
 			// std::unique_lock<std::shared_timed_mutex> lll(compaction_mtx);
-			immutable_map.store(new std::shared_ptr<dram_map_type>(nullptr));
+			immutable_map.store(new shared_ptr_type(nullptr));
 			delete imm_ptr;
 		}
 
@@ -213,7 +213,7 @@ std::thread new_map::start_bg_compaction()
 	});
 }
 
-bool new_map::dram_has_space(std::shared_ptr<dram_map_type> &map)
+bool new_map::dram_has_space(shared_ptr_type &map)
 {
 	return map->size() < dram_capacity;
 }
@@ -235,6 +235,7 @@ status new_map::put(string_view key, string_view value)
 			mut->mutable_count.fetch_sub(std::memory_order_release);
 			return status::OK;
 		} else {
+			mut->mutable_count.fetch_sub(std::memory_order_release);
 			bg_cv.notify_one();
 
 			// Do it in a single background thread (maybe notify this bg
@@ -287,13 +288,13 @@ void new_map::Recover()
 
 	// mtxs = std::vector<mutex_type>(SHARDS_NUM);
 
-	mutable_map =
-		new std::shared_ptr<dram_map_type>(std::make_unique<dram_map_type>());
-	immutable_map = new std::shared_ptr<dram_map_type>(nullptr);
-
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
 	if (dram_capacity)
 		this->dram_capacity = std::stoi(dram_capacity);
+
+	mutable_map =
+		new shared_ptr_type(std::make_shared<dram_map_type>(this->dram_capacity * 2));
+	immutable_map = new shared_ptr_type(nullptr);
 
 	container = new container_type();
 
@@ -313,15 +314,19 @@ void new_map::Recover()
 			assert(imm == nullptr);
 
 			immutable_map.store(mut_ptr);
-			mutable_map.store(new std::shared_ptr<dram_map_type>(
+			mutable_map.store(new shared_ptr_type(
 				std::make_shared<dram_map_type>(this->dram_capacity *
 								2)));
 
 			assert(*immutable_map.load(std::memory_order_acquire) != nullptr);
 
-			std::unique_lock<std::shared_timed_mutex> it_lock(iteration_mtx);
-
 			auto imm_ptr = immutable_map.load(std::memory_order_acquire);
+
+			//do {
+				imm_ptr = immutable_map.load(std::memory_order_acquire);
+			//} while ((*imm_ptr)->mutable_count.load(std::memory_order_acquire) > 0);
+
+			std::unique_lock<std::shared_timed_mutex> it_lock(iteration_mtx);
 
 			/// XXX: not necessary
 			imm = *imm_ptr;
@@ -359,7 +364,7 @@ void new_map::Recover()
 				// std::unique_lock<std::shared_timed_mutex>
 				// lll(compaction_mtx);
 				immutable_map.store(
-					new std::shared_ptr<dram_map_type>(nullptr));
+					new shared_ptr_type(nullptr));
 				delete imm_ptr;
 			}
 
@@ -369,6 +374,23 @@ void new_map::Recover()
 				return;
 		}
 	}).detach();
+
+	// std::thread([&] {
+	// 	while (true) {
+	// 		std::this_thread::yield();
+
+	// 		do {
+	// 			auto tf = to_free_size.load(std::memory_order_acquire);
+
+	// 			for (int i = 0; i < tf; i++) {
+	// 				delete to_free[i];
+	// 				to_free[i] = nullptr;
+	// 			}
+
+	// 			std::atomic<int> expected = tf;
+	// 		} while (!to_free_size.compare_exchage_weak(tf, 0, std::memory_order_release, std::memory_order_relaxed));
+	// 	}
+	// });
 }
 
 } // namespace kv
