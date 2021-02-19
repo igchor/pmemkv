@@ -293,7 +293,11 @@ void new_map::Recover()
 		this->dram_capacity = std::stoi(dram_capacity);
 
 	mutable_map =
-		new shared_ptr_type(std::make_shared<dram_map_type>(this->dram_capacity * 2));
+		new shared_ptr_type(std::shared_ptr<dram_map_type>(new dram_map_type(this->dram_capacity * 2), [&](dram_map_type* ptr){
+			auto ind = to_free_size.fetch_add(1);
+			to_free[ind] = ptr;
+			//delete ptr;
+		}));
 	immutable_map = new shared_ptr_type(nullptr);
 
 	container = new container_type();
@@ -314,9 +318,11 @@ void new_map::Recover()
 			assert(imm == nullptr);
 
 			immutable_map.store(mut_ptr);
-			mutable_map.store(new shared_ptr_type(
-				std::make_shared<dram_map_type>(this->dram_capacity *
-								2)));
+			mutable_map.store(new shared_ptr_type(std::shared_ptr<dram_map_type>(new dram_map_type(this->dram_capacity * 2), [&](dram_map_type* ptr){
+			auto ind = to_free_size.fetch_add(1);
+			to_free[ind] = ptr;
+			//delete ptr;
+		})));
 
 			assert(*immutable_map.load(std::memory_order_acquire) != nullptr);
 
@@ -375,22 +381,22 @@ void new_map::Recover()
 		}
 	}).detach();
 
-	// std::thread([&] {
-	// 	while (true) {
-	// 		std::this_thread::yield();
+	std::thread([&] {
+		while (true) {
+			std::this_thread::yield();
 
-	// 		do {
-	// 			auto tf = to_free_size.load(std::memory_order_acquire);
+			int tf;
+			do {
+				tf = to_free_size.load(std::memory_order_acquire);
 
-	// 			for (int i = 0; i < tf; i++) {
-	// 				delete to_free[i];
-	// 				to_free[i] = nullptr;
-	// 			}
+				for (int i = 0; i < tf; i++) {
+					delete to_free[i];
+					to_free[i] = nullptr;
+				}
 
-	// 			std::atomic<int> expected = tf;
-	// 		} while (!to_free_size.compare_exchage_weak(tf, 0, std::memory_order_release, std::memory_order_relaxed));
-	// 	}
-	// });
+			} while (!to_free_size.compare_exchange_weak(tf, 0, std::memory_order_release, std::memory_order_relaxed));
+		}
+	}).detach();
 }
 
 } // namespace kv
