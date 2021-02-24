@@ -6,6 +6,8 @@
 #include "../iterator.h"
 #include "../pmemobj_engine.h"
 
+#define TBB_PREVIEW_MEMORY_POOL 1
+
 #include <libpmemobj++/container/concurrent_hash_map.hpp>
 #include <libpmemobj++/container/string.hpp>
 #include <libpmemobj++/detail/pair.hpp>
@@ -13,6 +15,7 @@
 #include <libpmemobj++/experimental/radix_tree.hpp>
 #include <libpmemobj++/persistent_ptr.hpp>
 
+#include <tbb/memory_pool.h>
 #include <tbb/concurrent_hash_map.h>
 
 #include <list>
@@ -88,6 +91,9 @@ public:
 	}
 };
 
+using pool_type = tbb::fixed_pool;
+using allocator = tbb::memory_pool_allocator<tbb::concurrent_hash_map<std::string, std::string>::value_type>;
+
 using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
 
 // using pmem_map_type =
@@ -99,17 +105,13 @@ using pmem_remove_log_type = obj::vector<obj::string>;
 
 struct dram_map_type {
 	using container_type =
-		tbb::concurrent_hash_map<std::string, std::string, dram_string_hasher>;
+		tbb::concurrent_hash_map<std::string, std::string, dram_string_hasher, allocator>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
 
 	static constexpr const char *tombstone = "tombstone"; // XXX
 
-	dram_map_type()
-	{
-	}
-
-	dram_map_type(size_t n) : map(n)
+	dram_map_type(size_t n, const allocator& alloc) : map(n, alloc)
 	{
 	}
 
@@ -225,6 +227,7 @@ public:
 	}
 
 private:
+
 	using dram_map_type = internal::new_map::dram_map_type;
 	using container_type = tbb::concurrent_hash_map<std::string, std::string>;
 	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
@@ -280,6 +283,12 @@ private:
 
 		hazard_pointers *hp;
 	};
+
+	void *buf[2];
+	internal::new_map::pool_type* pool[2];
+	internal::new_map::allocator* alloc[2];
+
+	int cnt = 0;
 };
 
 } /* namespace kv */

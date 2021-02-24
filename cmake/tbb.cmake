@@ -13,8 +13,9 @@ if(NOT TBB_FOUND)
 	# find_package without unsetting this var is not working correctly
 	unset(TBB_FOUND CACHE)
 
-	find_package(TBB REQUIRED tbb)
+	find_package(TBB REQUIRED tbb tbbmalloc)
 	set(TBB_LIBRARIES ${TBB_IMPORTED_TARGETS})
+	message(WARNING ${TBB_LIBRARIES})
 
 	message(STATUS "  Found in: ${TBB_DIR} (ver: ${TBB_VERSION})")
 	message(WARNING "TBB package found without pkg-config. If you'll compile a standalone "

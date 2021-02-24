@@ -346,7 +346,17 @@ void new_map::Recover()
 	if (dram_capacity)
 		this->dram_capacity = std::stoi(dram_capacity);
 
-	mutable_map = new dram_map_type(this->dram_capacity * 2);
+	
+	buf[0] = new char[this->dram_capacity * 1024 + 1024 * 1024];
+	buf[1] = new char[this->dram_capacity * 1024 + 1024 * 1024];
+
+	pool[0] = new internal::new_map::pool_type(buf[0], this->dram_capacity * 1024 + 1024 * 1024);
+	pool[1] = new internal::new_map::pool_type(buf[1], this->dram_capacity * 1024 + 1024 * 1024);
+
+	alloc[0] = new internal::new_map::allocator(*pool[0]);
+	alloc[1] = new internal::new_map::allocator(*pool[1]);
+
+	mutable_map = new dram_map_type(this->dram_capacity * 2, *alloc[0]);
 	immutable_map = nullptr;
 
 	container = std::unique_ptr<container_type>(new container_type());
@@ -368,9 +378,11 @@ void new_map::Recover()
 
 			assert(imm == nullptr);
 
+			auto new_cnt = (cnt + 1) % 2;
+
 			immutable_map.store(mut);
 			imm = mut;
-			mut = new dram_map_type(this->dram_capacity * 2);
+			mut = new dram_map_type(this->dram_capacity * 2, *alloc[new_cnt]);
 			mutable_map.store(mut);
 
 			assert(immutable_map.load(std::memory_order_acquire) != nullptr);
@@ -441,6 +453,10 @@ void new_map::Recover()
 				} while(spin);
 			}
 
+			pool[cnt]->recycle();
+
+			cnt = new_cnt;
+			// NEEDED?
 			delete imm; // XXX- decouple gc from compaction?
 
 			compaction_cv.notify_all(); // -> one?
