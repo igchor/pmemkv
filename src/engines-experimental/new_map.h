@@ -15,6 +15,8 @@
 
 #include <tbb/concurrent_hash_map.h>
 
+#include <list>
+
 #include <condition_variable>
 #include <endian.h>
 #include <shared_mutex>
@@ -228,10 +230,8 @@ private:
 	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
 	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
 
-	using shared_ptr_type = std::shared_ptr<dram_map_type>;
-
 	std::thread start_bg_compaction();
-	bool dram_has_space(shared_ptr_type &map);
+	bool dram_has_space(dram_map_type &map);
 
 	void Recover();
 
@@ -250,21 +250,38 @@ private:
 
 	uint64_t dram_capacity = 1024;
 
-	std::atomic<shared_ptr_type *> mutable_map;
-	std::atomic<shared_ptr_type *> immutable_map;
+	std::atomic<dram_map_type *> mutable_map;
+	std::atomic<dram_map_type *> immutable_map;
 
 	std::mutex compaction_mtx;
 	std::shared_timed_mutex iteration_mtx;
-
 	std::condition_variable compaction_cv;
-
 	std::mutex bg_mtx;
 	std::condition_variable bg_cv;
-
 	std::atomic<bool> is_shutting_down = false;
 
-	std::array<dram_map_type*, 10> to_free;
-	std::atomic<int> to_free_size = 0;
+	struct hazard_pointers {
+		std::atomic<dram_map_type *> mut = nullptr, imm = nullptr;
+	};
+
+	std::mutex hazard_pointers_mtx;
+	std::list<std::unique_ptr<hazard_pointers>> hazard_pointers_list;
+
+	struct hazard_pointers_handler {
+		hazard_pointers_handler(new_map *map)
+		{
+			std::unique_ptr<hazard_pointers> hp =
+				std::unique_ptr<hazard_pointers>(new hazard_pointers());
+			this->hp = hp.get();
+
+			std::unique_lock<std::mutex> lock(map->hazard_pointers_mtx);
+			map->hazard_pointers_list.push_back(std::move(hp));
+		}
+
+		// XXX - cleanup (shared_ptr for new_map?)
+
+		hazard_pointers *hp;
+	};
 };
 
 } /* namespace kv */

@@ -33,8 +33,7 @@ static uint64_t get_size(internal::config &cfg)
 	return size;
 }
 
-vcmap::vcmap(std::unique_ptr<internal::config> cfg)
-    :pmem_kv_container()
+vcmap::vcmap(std::unique_ptr<internal::config> cfg) : pmem_kv_container()
 {
 	LOG("Started ok");
 }
@@ -75,8 +74,7 @@ status vcmap::exists(string_view key)
 {
 	LOG("exists for key=" << std::string(key.data(), key.size()));
 	map_t::const_accessor result;
-	const bool result_found = pmem_kv_container.find(
-		result, key);
+	const bool result_found = pmem_kv_container.find(result, key);
 	return (result_found ? status::OK : status::NOT_FOUND);
 }
 
@@ -84,8 +82,7 @@ status vcmap::get(string_view key, get_v_callback *callback, void *arg)
 {
 	LOG("get key=" << std::string(key.data(), key.size()));
 	map_t::const_accessor result;
-	const bool result_found = pmem_kv_container.find(
-		result, key);
+	const bool result_found = pmem_kv_container.find(result, key);
 	if (!result_found) {
 		LOG("  key not found");
 		return status::NOT_FOUND;
@@ -103,7 +100,7 @@ status vcmap::put(string_view key, string_view value)
 	map_t::accessor acc;
 	pmem_kv_container.insert(acc, key);
 	acc->second.assign(value.data(), value.size());
-		
+
 	return status::OK;
 }
 
@@ -125,8 +122,7 @@ internal::iterator_base *vcmap::new_const_iterator()
 	return new vcmap_iterator<true>{&pmem_kv_container};
 }
 
-vcmap::vcmap_iterator<true>::vcmap_iterator(container_type *c)
-    : container(c)
+vcmap::vcmap_iterator<true>::vcmap_iterator(container_type *c) : container(c)
 {
 }
 
