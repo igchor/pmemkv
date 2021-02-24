@@ -235,7 +235,7 @@ private:
 
 	void Recover();
 
-	container_type *container;
+	std::unique_ptr<container_type> container;
 	pmem_insert_log_type *insert_log;
 	pmem_remove_log_type *remove_log;
 	std::unique_ptr<internal::config> config;
@@ -265,17 +265,15 @@ private:
 	};
 
 	std::mutex hazard_pointers_mtx;
-	std::list<std::unique_ptr<hazard_pointers>> hazard_pointers_list;
+	std::list<hazard_pointers*> hazard_pointers_list;
 
 	struct hazard_pointers_handler {
 		hazard_pointers_handler(new_map *map)
 		{
-			std::unique_ptr<hazard_pointers> hp =
-				std::unique_ptr<hazard_pointers>(new hazard_pointers());
-			this->hp = hp.get();
-
 			std::unique_lock<std::mutex> lock(map->hazard_pointers_mtx);
-			map->hazard_pointers_list.push_back(std::move(hp));
+			auto hp = new hazard_pointers();
+			this->hp = hp;
+			map->hazard_pointers_list.push_back(hp);
 		}
 
 		// XXX - cleanup (shared_ptr for new_map?)

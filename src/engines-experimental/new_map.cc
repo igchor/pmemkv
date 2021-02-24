@@ -76,10 +76,19 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 	LOG("get_all");
 	check_outside_tx();
 
+	static thread_local hazard_pointers_handler hp_handler(this);
+
+restart:
 	std::unique_lock<std::shared_timed_mutex> lock(iteration_mtx);
 
 	auto mut = mutable_map.load(std::memory_order_acquire);
 	auto imm = immutable_map.load(std::memory_order_acquire);
+
+	hp_handler.hp->mut.store(mut, std::memory_order_release);
+	hp_handler.hp->imm.store(imm, std::memory_order_release);
+
+	if (mutable_map.load(std::memory_order_acquire) != mut || immutable_map.load(std::memory_order_acquire) != imm)
+		goto restart;
 
 	auto mut_pred = [](string_view, string_view v) {
 		return v != dram_map_type::tombstone;
@@ -94,16 +103,25 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 	};
 
 	auto s = iterate(mut->begin(), mut->end(), mut_pred, callback, arg);
-	if (s != status::OK)
+	if (s != status::OK) {
+					hp_handler.hp->mut.store(nullptr, std::memory_order_release);
+			hp_handler.hp->imm.store(nullptr, std::memory_order_release);
 		return s;
+	}
 
 	if (imm) {
 		s = iterate(imm->begin(), imm->end(), imm_pred, callback, arg);
-		if (s != status::OK)
+		if (s != status::OK) {
+						hp_handler.hp->mut.store(nullptr, std::memory_order_release);
+			hp_handler.hp->imm.store(nullptr, std::memory_order_release);
 			return s;
+		}
 	}
 
-	return iterate(container->begin(), container->end(), pmem_pred, callback, arg);
+	auto ret = iterate(container->begin(), container->end(), pmem_pred, callback, arg);
+				hp_handler.hp->mut.store(nullptr, std::memory_order_release);
+			hp_handler.hp->imm.store(nullptr, std::memory_order_release);
+	return ret;
 }
 
 status new_map::exists(string_view key)
@@ -120,6 +138,7 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 
 	LOG("get key=" << std::string(key.data(), key.size()));
 
+restart:
 	std::shared_lock<std::shared_timed_mutex> it_lock(iteration_mtx);
 	// std::shared_lock<std::shared_timed_mutex> sh_lock(compaction_mtx);
 
@@ -128,6 +147,9 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 
 	hp_handler.hp->mut.store(mut, std::memory_order_release);
 	hp_handler.hp->imm.store(imm, std::memory_order_release);
+
+	if (mutable_map.load(std::memory_order_acquire) != mut || immutable_map.load(std::memory_order_acquire) != imm)
+		goto restart;
 
 	{
 		dram_map_type::const_accessor_type acc;
@@ -230,8 +252,8 @@ std::thread new_map::start_bg_compaction()
 
 	// 		{
 	// 			// std::unique_lock<std::shared_timed_mutex>
-	// lll(compaction_mtx); 			immutable_map.store(new shared_ptr_type(nullptr)); 			delete
-	// imm_ptr;
+	// lll(compaction_mtx); 			immutable_map.store(new
+	// shared_ptr_type(nullptr)); 			delete imm_ptr;
 	// 		}
 
 	// 		compaction_cv.notify_all(); // -> one?
@@ -257,12 +279,18 @@ status new_map::put(string_view key, string_view value)
 		hp_handler.hp->mut.store(mut, std::memory_order_release);
 		hp_handler.hp->imm.store(imm, std::memory_order_release);
 
+		if (mutable_map.load(std::memory_order_acquire) != mut || immutable_map.load(std::memory_order_acquire) != imm)
+			continue;
+
 		if (dram_has_space(*mut)) {
 			mut->put(key, value);
 			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
 			hp_handler.hp->imm.store(nullptr, std::memory_order_release);
 			return status::OK;
 		} else {
+			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
+			hp_handler.hp->imm.store(nullptr, std::memory_order_release);
+
 			bg_cv.notify_one();
 
 			// Do it in a single background thread (maybe notify this bg
@@ -276,9 +304,6 @@ status new_map::put(string_view key, string_view value)
 			});
 		}
 	} while (true);
-
-	hp_handler.hp->mut.store(nullptr, std::memory_order_release);
-	hp_handler.hp->imm.store(nullptr, std::memory_order_release);
 	return status::OK;
 }
 
@@ -324,7 +349,7 @@ void new_map::Recover()
 	mutable_map = new dram_map_type(this->dram_capacity * 2);
 	immutable_map = nullptr;
 
-	container = new container_type();
+	container = std::unique_ptr<container_type>(new container_type());
 
 	std::thread([&] {
 		while (true) {
@@ -334,6 +359,9 @@ void new_map::Recover()
 					       std::memory_order_acquire)) ||
 					is_shutting_down.load();
 			});
+
+			if (is_shutting_down.load())
+				return;
 
 			auto mut = mutable_map.load(std::memory_order_acquire);
 			auto imm = immutable_map.load(std::memory_order_acquire);
@@ -350,8 +378,7 @@ void new_map::Recover()
 			/* Wait until imm pointer is not referenced by mut */
 			{
 				bool spin;
-
-				while (spin) {
+				do {
 					std::unique_lock<std::mutex> lock(
 						hazard_pointers_mtx);
 					spin = false;
@@ -361,7 +388,7 @@ void new_map::Recover()
 						    imm)
 							spin = true;
 					}
-				}
+				} while (spin);
 			}
 
 			// XXX - remove
@@ -401,8 +428,7 @@ void new_map::Recover()
 
 			{
 				bool spin;
-
-				while (spin) {
+				do {
 					std::unique_lock<std::mutex> lock(
 						hazard_pointers_mtx);
 					spin = false;
@@ -412,7 +438,7 @@ void new_map::Recover()
 						    imm)
 							spin = true;
 					}
-				}
+				} while(spin);
 			}
 
 			delete imm; // XXX- decouple gc from compaction?
