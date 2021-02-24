@@ -70,13 +70,16 @@ private:
 	}
 };
 
+using string_allocator = tbb::memory_pool_allocator<char>;
+using string_type = std::basic_string<char, std::char_traits<char>, string_allocator>;
+
 class dram_string_hasher {
 public:
 	using is_transparent = void;
 
-	size_t hash(const std::string &str) const
+	size_t hash(const string_type &str) const
 	{
-		return std::hash<std::string>{}(str);
+		return std::hash<std::string_view>{}(std::string_view(str.data(), str.size()));
 	}
 
 	size_t hash(string_view str) const
@@ -92,7 +95,7 @@ public:
 };
 
 using pool_type = tbb::fixed_pool;
-using allocator = tbb::memory_pool_allocator<tbb::concurrent_hash_map<std::string, std::string>::value_type>;
+using allocator = tbb::memory_pool_allocator<tbb::concurrent_hash_map<string_type, string_type>::value_type>;
 
 using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
 
@@ -100,18 +103,28 @@ using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_
 // pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
 // 					    pmem::obj::experimental::inline_string>;
 
+struct pool_allocator {
+	pool_allocator(size_t size): buf(new char[size]), pool(buf, size), alloc(pool), str_alloc(pool) {
+	}
+
+	void *buf;
+	internal::new_map::pool_type pool;
+	internal::new_map::allocator alloc;
+	string_allocator str_alloc;
+};
+
 using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
 using pmem_remove_log_type = obj::vector<obj::string>;
 
 struct dram_map_type {
 	using container_type =
-		tbb::concurrent_hash_map<std::string, std::string, dram_string_hasher, allocator>;
+		tbb::concurrent_hash_map<string_type, string_type, dram_string_hasher, allocator>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
 
 	static constexpr const char *tombstone = "tombstone"; // XXX
 
-	dram_map_type(size_t n, const allocator& alloc) : map(n, alloc)
+	dram_map_type(size_t n, pool_allocator* alloc) : map(n, alloc->alloc), alloc(alloc)
 	{
 	}
 
@@ -119,7 +132,7 @@ struct dram_map_type {
 	{
 		container_type::accessor acc;
 
-		map.insert(acc, key);
+		map.emplace(acc, std::piecewise_construct, std::forward_as_tuple(key.data(), key.size(), alloc->str_alloc), std::forward_as_tuple(alloc->str_alloc));
 		acc->second = value;
 	}
 
@@ -142,7 +155,7 @@ struct dram_map_type {
 	/* Element exists in the dram map (alive or tombstone) */
 	bool exists(string_view key)
 	{
-		return map.count(std::string(key.data(), key.size())) == 0 ? false : true;
+		return map.count(string_type(key.data(), key.size(), alloc->str_alloc)) == 0 ? false : true;
 	}
 
 	container_type::iterator begin()
@@ -161,6 +174,7 @@ struct dram_map_type {
 	}
 
 	container_type map;
+	pool_allocator* alloc;
 
 	std::atomic<std::size_t> mutable_count = 0;
 };
@@ -261,6 +275,9 @@ private:
 	std::condition_variable compaction_cv;
 	std::mutex bg_mtx;
 	std::condition_variable bg_cv;
+
+	bool out_of_space = false;
+
 	std::atomic<bool> is_shutting_down = false;
 
 	struct hazard_pointers {
@@ -284,11 +301,7 @@ private:
 		hazard_pointers *hp;
 	};
 
-	void *buf[2];
-	internal::new_map::pool_type* pool[2];
-	internal::new_map::allocator* alloc[2];
-
-	int cnt = 0;
+	internal::new_map::pool_allocator* pool_alloc_buff;
 };
 
 } /* namespace kv */

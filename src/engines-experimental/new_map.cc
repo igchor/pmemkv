@@ -282,26 +282,26 @@ status new_map::put(string_view key, string_view value)
 		if (mutable_map.load(std::memory_order_acquire) != mut || immutable_map.load(std::memory_order_acquire) != imm)
 			continue;
 
-		if (dram_has_space(*mut)) {
+		try {
 			mut->put(key, value);
+
 			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
 			hp_handler.hp->imm.store(nullptr, std::memory_order_release);
+
 			return status::OK;
-		} else {
+		} catch (std::bad_alloc &e) {
 			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
 			hp_handler.hp->imm.store(nullptr, std::memory_order_release);
+
+			{
+				std::unique_lock<std::mutex> lock(bg_mtx);
+				out_of_space = true;
+			}
 
 			bg_cv.notify_one();
 
-			// Do it in a single background thread (maybe notify this bg
-			// thread using notify_one()?) to avoid blocking several threads
-			// here
 			std::unique_lock<std::mutex> compaction_lock(compaction_mtx);
-
-			compaction_cv.wait(compaction_lock, [&] {
-				return dram_has_space(
-					*mutable_map.load(std::memory_order_acquire));
-			});
+			compaction_cv.wait(compaction_lock);
 		}
 	} while (true);
 	return status::OK;
@@ -347,16 +347,10 @@ void new_map::Recover()
 		this->dram_capacity = std::stoi(dram_capacity);
 
 	
-	buf[0] = new char[this->dram_capacity * 1024 + 1024 * 1024];
-	buf[1] = new char[this->dram_capacity * 1024 + 1024 * 1024];
+	auto pool_alloc = new internal::new_map::pool_allocator(this->dram_capacity * 1024 + 100 * 1024);
+	pool_alloc_buff = new internal::new_map::pool_allocator(this->dram_capacity * 1024 + 100 * 1024);
 
-	pool[0] = new internal::new_map::pool_type(buf[0], this->dram_capacity * 1024 + 1024 * 1024);
-	pool[1] = new internal::new_map::pool_type(buf[1], this->dram_capacity * 1024 + 1024 * 1024);
-
-	alloc[0] = new internal::new_map::allocator(*pool[0]);
-	alloc[1] = new internal::new_map::allocator(*pool[1]);
-
-	mutable_map = new dram_map_type(this->dram_capacity * 2, *alloc[0]);
+	mutable_map = new dram_map_type(this->dram_capacity * 2, pool_alloc);
 	immutable_map = nullptr;
 
 	container = std::unique_ptr<container_type>(new container_type());
@@ -364,10 +358,8 @@ void new_map::Recover()
 	std::thread([&] {
 		while (true) {
 			std::unique_lock<std::mutex> lock(bg_mtx);
-			bg_cv.wait(lock, [&] {
-				return !dram_has_space(*mutable_map.load(
-					       std::memory_order_acquire)) ||
-					is_shutting_down.load();
+			bg_cv.wait(lock, [&]{
+				return is_shutting_down.load() || out_of_space;
 			});
 
 			if (is_shutting_down.load())
@@ -378,11 +370,9 @@ void new_map::Recover()
 
 			assert(imm == nullptr);
 
-			auto new_cnt = (cnt + 1) % 2;
-
 			immutable_map.store(mut);
 			imm = mut;
-			mut = new dram_map_type(this->dram_capacity * 2, *alloc[new_cnt]);
+			mut = new dram_map_type(this->dram_capacity * 2, pool_alloc_buff);
 			mutable_map.store(mut);
 
 			assert(immutable_map.load(std::memory_order_acquire) != nullptr);
@@ -412,27 +402,23 @@ void new_map::Recover()
 			size_t elements = 0;
 			for (const auto &e : *imm) {
 				if (e.second == dram_map_type::tombstone) {
-					container->erase(e.first);
+					container->erase(std::string(e.first.data(), e.first.size()));
 				} else {
-					container->emplace(e.first, e.second);
+					container->emplace(std::string(e.first.data(), e.first.size()), std::string(e.second.data(), e.second.size()));
 				}
 				elements++;
-			}
-
-			if (elements != imm->size()) {
-				std::cout << elements << " " << imm->size() << std::endl;
 			}
 
 			assert(elements == imm->size());
 
 			// XXX debug
 #ifndef NDEBUG
-			for (const auto &e : *imm) {
-				if (e.second == dram_map_type::tombstone) {
-					assert(container->count(e.first) == 0);
-				} else
-					assert(container->count(e.first) == 1);
-			}
+			// for (const auto &e : *imm) {
+			// 	if (e.second == dram_map_type::tombstone) {
+			// 		assert(container->count(e.first) == 0);
+			// 	} else
+			// 		assert(container->count(e.first) == 1);
+			// }
 #endif
 
 			/* Wait until imm is not used anywhere */
@@ -453,13 +439,15 @@ void new_map::Recover()
 				} while(spin);
 			}
 
-			pool[cnt]->recycle();
+			pool_alloc_buff = imm->alloc;
+			pool_alloc_buff->pool.recycle();
 
-			cnt = new_cnt;
 			// NEEDED?
-			delete imm; // XXX- decouple gc from compaction?
+			// delete imm; // XXX- decouple gc from compaction?
 
 			compaction_cv.notify_all(); // -> one?
+
+			out_of_space = false;
 
 			if (is_shutting_down.load())
 				return;
