@@ -3,9 +3,9 @@
 
 message(STATUS "Checking for module 'tbb'")
 
-if(PKG_CONFIG_FOUND)
-	pkg_check_modules(TBB QUIET tbb)
-endif()
+#if(PKG_CONFIG_FOUND)
+#	pkg_check_modules(TBB QUIET tbb)
+#endif()
 
 # Now, if needed, try to find it without pkg-config. 'find_package' way will work
 # most likely just only for testing and development, not when linking with an actual app.
