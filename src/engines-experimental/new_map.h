@@ -24,6 +24,8 @@
 #include <endian.h>
 #include <shared_mutex>
 
+#include <tbb/concurrent_queue.h>
+
 namespace pmem
 {
 namespace kv
@@ -95,7 +97,7 @@ public:
 };
 
 using pool_type = tbb::fixed_pool;
-using allocator = tbb::memory_pool_allocator<tbb::concurrent_hash_map<string_type, string_type>::value_type>;
+using allocator = tbb::memory_pool_allocator<tbb::concurrent_hash_map<string_type, string_view>::value_type>;
 
 using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
 
@@ -118,7 +120,7 @@ using pmem_remove_log_type = obj::vector<obj::string>;
 
 struct dram_map_type {
 	using container_type =
-		tbb::concurrent_hash_map<string_type, string_type, dram_string_hasher, allocator>;
+		tbb::concurrent_hash_map<string_type, string_view, dram_string_hasher, allocator>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
 
@@ -132,7 +134,7 @@ struct dram_map_type {
 	{
 		container_type::accessor acc;
 
-		map.emplace(acc, std::piecewise_construct, std::forward_as_tuple(key.data(), key.size(), alloc->str_alloc), std::forward_as_tuple(alloc->str_alloc));
+		map.emplace(acc, std::piecewise_construct, std::forward_as_tuple(key.data(), key.size(), alloc->str_alloc), std::forward_as_tuple(value));
 		acc->second = value;
 	}
 
@@ -175,8 +177,6 @@ struct dram_map_type {
 
 	container_type map;
 	pool_allocator* alloc;
-
-	std::atomic<std::size_t> mutable_count = 0;
 };
 
 struct pmem_type {
@@ -187,8 +187,6 @@ struct pmem_type {
 
 	// obj::vector<pmem_map_type> map;
 	pmem_map_type map;
-	pmem_insert_log_type insert_log;
-	pmem_remove_log_type remove_log;
 	uint64_t reserved[8];
 };
 
@@ -224,38 +222,25 @@ public:
 
 	void flush() final
 	{
-		std::unique_lock<std::mutex> lock(compaction_mtx);
-
-		// compaction_cv.wait(lock, [&] { return immutable_map == nullptr; });
-
-		// /* If we end up here, neither mutable nor immutable map
-		//  * can be changed concurrently. The only allowed
-		//  * concurrent change is setting immutable_map to nullptr
-		//  * (by the compaction thread). */
-		// immutable_map = std::move(mutable_map);
-		// mutable_map = std::make_unique<dram_map_type>();
-
-		// auto t = start_bg_compaction();
-		// lock.unlock();
-		// t.join();
 	}
 
 private:
 
 	using dram_map_type = internal::new_map::dram_map_type;
-	using container_type = tbb::concurrent_hash_map<std::string, std::string>;
+	using container_type = internal::new_map::pmem_map_type;
 	using pmem_insert_log_type = internal::new_map::pmem_insert_log_type;
 	using pmem_remove_log_type = internal::new_map::pmem_remove_log_type;
+	using pmem_type = internal::new_map::pmem_type;
 
 	std::thread start_bg_compaction();
 	bool dram_has_space(dram_map_type &map);
 
 	void Recover();
 
-	std::unique_ptr<container_type> container;
-	pmem_insert_log_type *insert_log;
-	pmem_remove_log_type *remove_log;
+	container_type* container;
 	std::unique_ptr<internal::config> config;
+
+	pmem_type* pmem;
 
 	using mutex_type = std::shared_timed_mutex;
 	using unique_lock_type = std::unique_lock<mutex_type>;
@@ -302,6 +287,16 @@ private:
 	};
 
 	internal::new_map::pool_allocator* pool_alloc_buff;
+
+	//using val_type = std::pair<std::string, std::string>;
+	using val_type = std::pair<string_view, string_view>;
+
+	std::atomic<int> bg_cnt = 0;
+
+	tbb::concurrent_queue<val_type> queue1;
+
+	uint64_t pool_size = 0;
+	uint64_t log_size = 0;
 };
 
 } /* namespace kv */
