@@ -287,9 +287,10 @@ private:
 
 	std::atomic<int> bg_cnt = 0;
 
-	tbb::concurrent_queue<val_type> queue1;
+	tbb::concurrent_queue<val_type> queue[24];
 
 	uint64_t log_size = 0;
+	uint64_t bg_threads = 8;
 };
 
 } /* namespace kv */

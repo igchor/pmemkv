@@ -235,6 +235,37 @@ struct pmem_log {
 	size_t size;
 };
 
+static inline uint64_t mix(uint64_t h)
+{
+	h ^= h >> 23;
+	h *= 0x2127599bf4325c37ULL;
+	return h ^ h >> 47;
+}
+
+/*
+ * hash --  calculate the hash of a piece of memory
+ */
+static uint64_t fast_hash(size_t key_size, const char *key)
+{
+	/* fast-hash, by Zilong Tan */
+	const uint64_t m = 0x880355f21e6d1965ULL;
+	const uint64_t *pos = (const uint64_t *)key;
+	const uint64_t *end = pos + (key_size / 8);
+	uint64_t h = key_size * m;
+
+	while (pos != end)
+		h = (h ^ mix(*pos++)) * m;
+
+	if (key_size & 7) {
+		uint64_t shift = (key_size & 7) * 8;
+		uint64_t mask = (1ULL << shift) - 1;
+		uint64_t v = htole64(*pos) & mask;
+		h = (h ^ mix(v)) * m;
+	}
+
+	return mix(h);
+}
+
 status new_map::put(string_view key, string_view value)
 {
 	LOG("put key=" << std::string(key.data(), key.size())
@@ -290,7 +321,7 @@ status new_map::put(string_view key, string_view value)
 			auto v = string_view(entry_pos + 16 + key.size(), value.size());
 
 			mut->put(key, v);
-			queue1.emplace(k, v);
+			queue[fast_hash(k_size, key.data()) % (this->bg_threads - 1)].emplace(k, v);
 
 			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
 
@@ -343,31 +374,36 @@ void new_map::Recover()
 	if (log_size)
 		this->log_size = std::stoi(log_size);
 
+	auto bg_threads = std::getenv("BG_THREADS");
+	if (bg_threads)
+		this->bg_threads = std::stoi(bg_threads);
 
 	mutable_map = new dram_map_type(this->dram_capacity * 2);
 	immutable_map = nullptr;
 
 	container = &pmem->map;
 
-	std::thread([&] {
-		bg_cnt++;
+	for (int i = 0; i < this->bg_threads; i++) {
+		std::thread([&, i=i] {
+			bg_cnt++;
 
-		while (true) {
-			if (is_shutting_down.load()) {
-				bg_cnt--;
-				return;
+			while (true) {
+				if (is_shutting_down.load()) {
+					bg_cnt--;
+					return;
+				}
+
+				val_type val;
+				if (!queue[i].try_pop(val))
+					continue;
+
+				if (val.second == dram_map_type::tombstone)
+					container->erase(val.first);
+				else
+					container->insert_or_assign(val.first, val.second);
 			}
-
-			val_type val;
-			if (!queue1.try_pop(val))
-				continue;
-
-			if (val.second == dram_map_type::tombstone)
-				container->erase(val.first);
-			else
-				container->insert_or_assign(val.first, val.second);
-		}
-	}).detach();
+		}).detach();
+	}
 
 	std::thread([&] {
 		bg_cnt++;
@@ -385,15 +421,17 @@ void new_map::Recover()
 
 
 			// before changing mutable map because get() would not find some elements
-			while (!queue1.empty()) {
+		for (int i = 0; i < this->bg_threads; i++) {
+			while (!queue[i].empty()) {
 				val_type val;
-				if (queue1.try_pop(val)) {
+				if (queue[i].try_pop(val)) {
 					if (val.second == dram_map_type::tombstone)
 						container->erase(val.first);
 					else
 						container->insert_or_assign(val.first, val.second);
 				}
 			}
+		}
 
 			auto mut = mutable_map.load(std::memory_order_acquire);
 			mutable_map.store(new dram_map_type(this->dram_capacity * 2));
