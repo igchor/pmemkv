@@ -218,9 +218,9 @@ std::thread new_map::start_bg_compaction()
 	// 	});
 }
 
-bool new_map::dram_has_space(dram_map_type &map)
+bool new_map::dram_has_space()
 {
-	return map.size() < dram_capacity;
+	return dram_size.load(std::memory_order_acquire) < dram_capacity;
 }
 
 struct pmem_log {
@@ -274,15 +274,7 @@ status new_map::put(string_view key, string_view value)
 	static thread_local hazard_pointers_handler hp_handler(this);
 
 	do {
-		auto mut = mutable_map.load(std::memory_order_acquire);
-		hp_handler.hp->mut.store(mut, std::memory_order_release);
-
-		if (mutable_map.load(std::memory_order_acquire) != mut)
-			continue;
-
-		if (!dram_has_space(*mut)) {
-			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
-
+		if (!dram_has_space()) {
 			bg_cv.notify_one();
 
 			// log.size = 0; //
@@ -294,14 +286,14 @@ status new_map::put(string_view key, string_view value)
 
 			return status::OK;
 		} else {
-			auto &log = pmem->ptls.local();
-			if (log.ptr == nullptr) {
-				obj::transaction::run(pmpool, [&]{
-					log.ptr = obj::make_persistent<char[]>(this->log_size);
-					assert(log.ptr);
-					log.size = 0;
-				});
-			}
+			auto mut = mutable_map.load(std::memory_order_acquire);
+			hp_handler.hp->mut.store(mut, std::memory_order_release);
+
+			if (mutable_map.load(std::memory_order_acquire) != mut)
+				continue;
+
+			static thread_local tls_holder holder(pmpool, pmem, this->log_size);
+			auto &log = holder.log;
 
 			auto k_size = key.size();
 			auto v_size = value.size();
@@ -322,6 +314,8 @@ status new_map::put(string_view key, string_view value)
 
 			mut->put(key, v);
 			queue[fast_hash(k_size, key.data()) % (this->bg_threads - 1)].emplace(k, v);
+
+			dram_size.fetch_add(1, std::memory_order_relaxed);
 
 			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
 
@@ -411,7 +405,7 @@ void new_map::Recover()
 		while (true) {
 			std::unique_lock<std::mutex> lock(bg_mtx);
 			bg_cv.wait(lock, [&]{
-				return is_shutting_down.load() || out_of_space || !dram_has_space(*mutable_map.load());
+				return is_shutting_down.load() || out_of_space || !dram_has_space();
 			});
 
 			if (is_shutting_down.load()) {
@@ -419,24 +413,9 @@ void new_map::Recover()
 				return;
 			}
 
+		auto mut = mutable_map.load(std::memory_order_acquire);
 
-			// before changing mutable map because get() would not find some elements
-		for (int i = 0; i < this->bg_threads; i++) {
-			while (!queue[i].empty()) {
-				val_type val;
-				if (queue[i].try_pop(val)) {
-					if (val.second == dram_map_type::tombstone)
-						container->erase(val.first);
-					else
-						container->insert_or_assign(val.first, val.second);
-				}
-			}
-		}
-
-			auto mut = mutable_map.load(std::memory_order_acquire);
-			mutable_map.store(new dram_map_type(this->dram_capacity * 2));
-
-		{
+			{
 			bool spin;
 			do {
 					std::unique_lock<std::mutex> lock(
@@ -451,9 +430,25 @@ void new_map::Recover()
 			} while (spin);
 		}
 
-			delete mut;
+			mutable_map.store(new dram_map_type(this->dram_capacity * 2));
+
+					// before changing mutable map because get() would not find some elements
+		for (int i = 0; i < this->bg_threads; i++) {
+			while (!queue[i].empty()) {
+				val_type val;
+				if (queue[i].try_pop(val)) {
+					if (val.second == dram_map_type::tombstone)
+						container->erase(val.first);
+					else
+						container->insert_or_assign(val.first, val.second);
+				}
+			}
+		}
+
+			delete mut; // do something with client logs!!!
 
 			out_of_space = false;
+			dram_size = 0;
 		}
 	}).detach();
 }

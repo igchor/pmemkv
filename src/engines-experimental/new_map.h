@@ -229,7 +229,7 @@ private:
 	using pmem_type = internal::new_map::pmem_type;
 
 	std::thread start_bg_compaction();
-	bool dram_has_space(dram_map_type &map);
+	bool dram_has_space();
 
 	void Recover();
 
@@ -291,6 +291,19 @@ private:
 
 	uint64_t log_size = 0;
 	uint64_t bg_threads = 8;
+
+	std::atomic<size_t> dram_size = 0;
+
+	struct tls_holder {
+		tls_holder(obj::pool_base& pmpool, pmem_type* pmem, size_t size): log(pmem->ptls.local()) {
+			obj::transaction::run(pmpool, [&]{
+				log.ptr = obj::make_persistent<char[]>(size);
+				assert(log.ptr);
+				log.size = 0;
+			});
+		}
+		internal::new_map::tls_data_t& log;
+	};
 };
 
 } /* namespace kv */
