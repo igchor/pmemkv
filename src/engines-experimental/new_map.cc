@@ -240,14 +240,10 @@ status new_map::put(string_view key, string_view value)
 	LOG("put key=" << std::string(key.data(), key.size())
 		       << ", value.size=" << std::to_string(value.size()));
 
-	static auto max_size = this->log_size;
-
 	static thread_local hazard_pointers_handler hp_handler(this);
-	static thread_local pmem_log plog(pmpool, max_size);
 
 	do {
 		auto mut = mutable_map.load(std::memory_order_acquire);
-
 		hp_handler.hp->mut.store(mut, std::memory_order_release);
 
 		if (mutable_map.load(std::memory_order_acquire) != mut)
@@ -258,7 +254,7 @@ status new_map::put(string_view key, string_view value)
 
 			bg_cv.notify_one();
 
-			plog.size = 0; // XXX
+			// log.size = 0; //
 
 			if (value != dram_map_type::tombstone)
 				pmem->map.insert_or_assign(key, value);
@@ -267,17 +263,34 @@ status new_map::put(string_view key, string_view value)
 
 			return status::OK;
 		} else {
-			pmemobj_memcpy_persist(pmpool.handle(), plog.buffer + plog.size, key.data(), key.size());
-			pmemobj_memcpy_persist(pmpool.handle(), plog.buffer + plog.size + key.size(), value.data(), value.size());
+			auto &log = pmem->ptls.local();
+			if (log.ptr == nullptr) {
+				obj::transaction::run(pmpool, [&]{
+					log.ptr = obj::make_persistent<char[]>(this->log_size);
+					assert(log.ptr);
+					log.size = 0;
+				});
+			}
 
-			auto k = string_view(plog.buffer + plog.size, key.size());
-			auto v = string_view(plog.buffer + plog.size + key.size(), value.size());
+			auto k_size = key.size();
+			auto v_size = value.size();
 
-			queue1.emplace(k, v);
+			auto entry_pos = log.ptr.get() + log.size;
+
+			pmemobj_memcpy(pmpool.handle(), entry_pos, (void*) &k_size, 8, PMEMOBJ_F_MEM_NODRAIN);
+			pmemobj_memcpy(pmpool.handle(), entry_pos + 8, (void*) &v_size, 8, PMEMOBJ_F_MEM_NODRAIN);
+			pmemobj_memcpy(pmpool.handle(), entry_pos + 16, key.data(), key.size(), PMEMOBJ_F_MEM_NODRAIN);
+			pmemobj_memcpy(pmpool.handle(), entry_pos + 16 + key.size(), value.data(), value.size(), PMEMOBJ_F_MEM_NODRAIN);
+			pmemobj_drain(pmpool.handle());
+
+			log.size += 16 + key.size() + value.size();
+			pmemobj_persist(pmpool.handle(), &log.size, 8);
+
+			auto k = string_view(entry_pos + 16, key.size());
+			auto v = string_view(entry_pos + 16 + key.size(), value.size());
+
 			mut->put(key, v);
-
-			plog.size += key.size() + value.size();
-			assert(plog.size <= max_size);
+			queue1.emplace(k, v);
 
 			hp_handler.hp->mut.store(nullptr, std::memory_order_release);
 
@@ -330,14 +343,8 @@ void new_map::Recover()
 	if (log_size)
 		this->log_size = std::stoi(log_size);
 
-	auto pool_size = std::getenv("POOL_SIZE");
-	if (pool_size)
-		this->pool_size = std::stoi(pool_size);
-	
-	auto pool_alloc = new internal::new_map::pool_allocator(this->pool_size);
-	pool_alloc_buff = new internal::new_map::pool_allocator(this->pool_size);
 
-	mutable_map = new dram_map_type(this->dram_capacity * 2, pool_alloc);
+	mutable_map = new dram_map_type(this->dram_capacity * 2);
 	immutable_map = nullptr;
 
 	container = &pmem->map;
@@ -389,7 +396,7 @@ void new_map::Recover()
 			}
 
 			auto mut = mutable_map.load(std::memory_order_acquire);
-			mutable_map.store(new dram_map_type(this->dram_capacity * 2, pool_alloc_buff));
+			mutable_map.store(new dram_map_type(this->dram_capacity * 2));
 
 		{
 			bool spin;
@@ -406,8 +413,7 @@ void new_map::Recover()
 			} while (spin);
 		}
 
-			pool_alloc_buff = mut->alloc;
-			pool_alloc_buff->pool.recycle();
+			delete mut;
 
 			out_of_space = false;
 		}

@@ -26,6 +26,10 @@
 
 #include <tbb/concurrent_queue.h>
 
+#include <libpmemobj++/detail/enumerable_thread_specific.hpp>
+
+#include <libpmemobj++/experimental/self_relative_ptr.hpp>
+
 namespace pmem
 {
 namespace kv
@@ -72,8 +76,7 @@ private:
 	}
 };
 
-using string_allocator = tbb::memory_pool_allocator<char>;
-using string_type = std::basic_string<char, std::char_traits<char>, string_allocator>;
+using string_type = std::basic_string<char, std::char_traits<char>>;
 
 class dram_string_hasher {
 public:
@@ -96,37 +99,24 @@ public:
 	}
 };
 
-using pool_type = tbb::fixed_pool;
-using allocator = tbb::memory_pool_allocator<tbb::concurrent_hash_map<string_type, string_view>::value_type>;
-
 using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
 
 // using pmem_map_type =
 // pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
 // 					    pmem::obj::experimental::inline_string>;
 
-struct pool_allocator {
-	pool_allocator(size_t size): buf(new char[size]), pool(buf, size), alloc(pool), str_alloc(pool) {
-	}
-
-	void *buf;
-	internal::new_map::pool_type pool;
-	internal::new_map::allocator alloc;
-	string_allocator str_alloc;
-};
-
 using pmem_insert_log_type = obj::vector<detail::pair<obj::string, obj::string>>;
 using pmem_remove_log_type = obj::vector<obj::string>;
 
 struct dram_map_type {
 	using container_type =
-		tbb::concurrent_hash_map<string_type, string_view, dram_string_hasher, allocator>;
+		tbb::concurrent_hash_map<string_type, string_view, dram_string_hasher>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
 
 	static constexpr const char *tombstone = "tombstone"; // XXX
 
-	dram_map_type(size_t n, pool_allocator* alloc) : map(n, alloc->alloc), alloc(alloc)
+	dram_map_type(size_t n) : map(n)
 	{
 	}
 
@@ -134,7 +124,7 @@ struct dram_map_type {
 	{
 		container_type::accessor acc;
 
-		map.emplace(acc, std::piecewise_construct, std::forward_as_tuple(key.data(), key.size(), alloc->str_alloc), std::forward_as_tuple(value));
+		map.emplace(acc, std::piecewise_construct, std::forward_as_tuple(key.data(), key.size()), std::forward_as_tuple(value));
 		acc->second = value;
 	}
 
@@ -157,7 +147,7 @@ struct dram_map_type {
 	/* Element exists in the dram map (alive or tombstone) */
 	bool exists(string_view key)
 	{
-		return map.count(string_type(key.data(), key.size(), alloc->str_alloc)) == 0 ? false : true;
+		return map.count(string_type(key.data(), key.size())) == 0 ? false : true;
 	}
 
 	container_type::iterator begin()
@@ -176,7 +166,11 @@ struct dram_map_type {
 	}
 
 	container_type map;
-	pool_allocator* alloc;
+};
+
+struct tls_data_t {
+	obj::experimental::self_relative_ptr<char[]> ptr;
+	obj::p<size_t> size; // XXX -> p?
 };
 
 struct pmem_type {
@@ -188,6 +182,8 @@ struct pmem_type {
 	// obj::vector<pmem_map_type> map;
 	pmem_map_type map;
 	uint64_t reserved[8];
+
+	detail::enumerable_thread_specific<tls_data_t> ptls;
 };
 
 // static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
@@ -286,8 +282,6 @@ private:
 		hazard_pointers *hp;
 	};
 
-	internal::new_map::pool_allocator* pool_alloc_buff;
-
 	//using val_type = std::pair<std::string, std::string>;
 	using val_type = std::pair<string_view, string_view>;
 
@@ -295,7 +289,6 @@ private:
 
 	tbb::concurrent_queue<val_type> queue1;
 
-	uint64_t pool_size = 0;
 	uint64_t log_size = 0;
 };
 
