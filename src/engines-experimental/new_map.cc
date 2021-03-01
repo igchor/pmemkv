@@ -8,53 +8,37 @@ namespace pmem
 {
 namespace kv
 {
-namespace internal
+
+static inline uint64_t mix(uint64_t h)
 {
-namespace new_map
-{
-transaction::transaction(pmem::obj::pool_base &pop, map_type *container)
-    : pop(pop), container(container)
-{
+	h ^= h >> 23;
+	h *= 0x2127599bf4325c37ULL;
+	return h ^ h >> 47;
 }
 
-status transaction::put(string_view key, string_view value)
+/*
+ * hash --  calculate the hash of a piece of memory
+ */
+static uint64_t fast_hash(size_t key_size, const char *key)
 {
-	log.insert(key, value);
-	return status::OK;
+	/* fast-hash, by Zilong Tan */
+	const uint64_t m = 0x880355f21e6d1965ULL;
+	const uint64_t *pos = (const uint64_t *)key;
+	const uint64_t *end = pos + (key_size / 8);
+	uint64_t h = key_size * m;
+
+	while (pos != end)
+		h = (h ^ mix(*pos++)) * m;
+
+	if (key_size & 7) {
+		uint64_t shift = (key_size & 7) * 8;
+		uint64_t mask = (1ULL << shift) - 1;
+		uint64_t v = htole64(*pos) & mask;
+		h = (h ^ mix(v)) * m;
+	}
+
+	return mix(h);
 }
-
-status transaction::remove(string_view key)
-{
-	log.remove(key);
-	return status::OK;
-}
-
-status transaction::commit()
-{
-	auto insert_cb = [&](const dram_log::element_type &e) {
-		auto result = container->try_emplace(e.first, e.second);
-
-		if (result.second == false)
-			result.first.assign_val(e.second);
-	};
-
-	auto remove_cb = [&](const dram_log::element_type &e) {
-		container->erase(e.first);
-	};
-
-	pmem::obj::transaction::run(pop, [&] { log.foreach (insert_cb, remove_cb); });
-
-	log.clear();
-
-	return status::OK;
-}
-
-void transaction::abort()
-{
-	log.clear();
-}
-} /* namespace new_map */
-} /* namespace internal */
 
 new_map::new_map(std::unique_ptr<internal::config> cfg)
     : pmemobj_engine_base(cfg, "pmemkv_new_map"), config(std::move(cfg))
@@ -311,210 +295,30 @@ internal::transaction *new_map::begin_tx()
 void new_map::Recover()
 {
 	if (!OID_IS_NULL(*root_oid)) {
-		auto pmem_ptr = static_cast<internal::new_map::pmem_type *>(
+		pmem_ptr = static_cast<internal::new_map::pmem_type *>(
 			pmemobj_direct(*root_oid));
-
-		container = &pmem_ptr->map;
 	} else {
 		pmem::obj::transaction::run(pmpool, [&] {
 			pmem::obj::transaction::snapshot(root_oid);
 			*root_oid =
 				pmem::obj::make_persistent<internal::new_map::pmem_type>()
 					.raw();
-			auto pmem_ptr = static_cast<internal::new_map::pmem_type *>(
+			pmem_ptr = static_cast<internal::new_map::pmem_type *>(
 				pmemobj_direct(*root_oid));
-			container = &pmem_ptr->map;
 		});
 	}
-}
 
-internal::iterator_base *new_map::new_iterator()
-{
-	return new new_map_iterator<false>{container};
-}
+	auto dram_capacity = std::getenv("DRAM_CAPACITY");
+	if (dram_capacity)
+		this->dram_capacity = std::stoi(dram_capacity);
 
-internal::iterator_base *new_map::new_const_iterator()
-{
-	return new new_map_iterator<true>{container};
-}
+	auto log_size = std::getenv("LOG_SIZE");
+	if (log_size)
+		this->log_size = std::stoi(log_size);
 
-new_map::new_map_iterator<true>::new_map_iterator(container_type *c)
-    : container(c), pop(pmem::obj::pool_by_vptr(c))
-{
-}
-
-new_map::new_map_iterator<false>::new_map_iterator(container_type *c)
-    : new_map::new_map_iterator<true>(c)
-{
-}
-
-status new_map::new_map_iterator<true>::seek(string_view key)
-{
-	init_seek();
-
-	it_ = container->find(key);
-	if (it_ != container->end())
-		return status::OK;
-
-	return status::NOT_FOUND;
-}
-
-status new_map::new_map_iterator<true>::seek_lower(string_view key)
-{
-	init_seek();
-
-	it_ = container->lower_bound(key);
-	if (it_ == container->begin()) {
-		it_ = container->end();
-		return status::NOT_FOUND;
-	}
-
-	--it_;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_lower_eq(string_view key)
-{
-	init_seek();
-
-	it_ = container->upper_bound(key);
-	if (it_ == container->begin()) {
-		it_ = container->end();
-		return status::NOT_FOUND;
-	}
-
-	--it_;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_higher(string_view key)
-{
-	init_seek();
-
-	it_ = container->upper_bound(key);
-	if (it_ == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_higher_eq(string_view key)
-{
-	init_seek();
-
-	it_ = container->lower_bound(key);
-	if (it_ == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_to_first()
-{
-	init_seek();
-
-	if (container->empty())
-		return status::NOT_FOUND;
-
-	it_ = container->begin();
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::seek_to_last()
-{
-	init_seek();
-
-	if (container->empty())
-		return status::NOT_FOUND;
-
-	it_ = container->end();
-	--it_;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::is_next()
-{
-	auto tmp = it_;
-	if (tmp == container->end() || ++tmp == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::next()
-{
-	init_seek();
-
-	if (it_ == container->end() || ++it_ == container->end())
-		return status::NOT_FOUND;
-
-	return status::OK;
-}
-
-status new_map::new_map_iterator<true>::prev()
-{
-	init_seek();
-
-	if (it_ == container->begin())
-		return status::NOT_FOUND;
-
-	--it_;
-
-	return status::OK;
-}
-
-result<string_view> new_map::new_map_iterator<true>::key()
-{
-	assert(it_ != container->end());
-
-	return {it_->key().cdata()};
-}
-
-result<pmem::obj::slice<const char *>> new_map::new_map_iterator<true>::read_range(size_t pos,
-									       size_t n)
-{
-	assert(it_ != container->end());
-
-	if (pos + n > it_->value().size() || pos + n < pos)
-		n = it_->value().size() - pos;
-
-	return {{it_->value().cdata() + pos, it_->value().cdata() + pos + n}};
-}
-
-result<pmem::obj::slice<char *>> new_map::new_map_iterator<false>::write_range(size_t pos,
-									   size_t n)
-{
-	assert(it_ != container->end());
-
-	if (pos + n > it_->value().size() || pos + n < pos)
-		n = it_->value().size() - pos;
-
-	log.push_back({std::string(it_->value().cdata() + pos, n), pos});
-	auto &val = log.back().first;
-
-	return {{&val[0], &val[n]}};
-}
-
-status new_map::new_map_iterator<false>::commit()
-{
-	pmem::obj::transaction::run(pop, [&] {
-		for (auto &p : log) {
-			auto dest = it_->value().range(p.second, p.first.size());
-			std::copy(p.first.begin(), p.first.end(), dest.begin());
-		}
-	});
-	log.clear();
-
-	return status::OK;
-}
-
-void new_map::new_map_iterator<false>::abort()
-{
-	log.clear();
+	auto worker_threads = std::getenv("BG_THREADS");
+	if (worker_threads)
+		this->bg_threads = std::stoi(worker_threads);
 }
 
 } // namespace kv

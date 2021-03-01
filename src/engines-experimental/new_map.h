@@ -15,6 +15,132 @@ namespace internal
 namespace new_map
 {
 
+class key_equal {
+public:
+	template <typename M, typename U>
+	bool operator()(const M &lhs, const U &rhs) const
+	{
+		return lhs == rhs;
+	}
+};
+
+class string_hasher {
+	/* hash multiplier used by fibonacci hashing */
+	static const size_t hash_multiplier = 11400714819323198485ULL;
+
+public:
+	using transparent_key_equal = key_equal;
+
+	size_t operator()(const obj::string &str) const
+	{
+		return hash(str.c_str(), str.size());
+	}
+
+	size_t operator()(string_view str) const
+	{
+		return hash(str.data(), str.size());
+	}
+
+private:
+	size_t hash(const char *str, size_t size) const
+	{
+		size_t h = 0;
+		for (size_t i = 0; i < size; ++i) {
+			h = static_cast<size_t>(str[i]) ^ (h * hash_multiplier);
+		}
+		return h;
+	}
+};
+
+using string_type = std::basic_string<char, std::char_traits<char>>;
+
+class dram_string_hasher {
+public:
+	using is_transparent = void;
+
+	size_t hash(const string_type &str) const
+	{
+		return std::hash<std::string_view>{}(std::string_view(str.data(), str.size()));
+	}
+
+	size_t hash(string_view str) const
+	{
+		return std::hash<string_view>{}(str);
+	}
+
+	template <typename M, typename U>
+	bool equal(const M &lhs, const U &rhs) const
+	{
+		return lhs == rhs;
+	}
+};
+
+using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
+
+// using pmem_map_type =
+// pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
+// 					    pmem::obj::experimental::inline_string>;
+
+struct dram_map_type {
+	using container_type =
+		tbb::concurrent_hash_map<string_type, string_view, dram_string_hasher>;
+	using accessor_type = container_type::accessor;
+	using const_accessor_type = container_type::const_accessor;
+
+	static constexpr const char *tombstone = "tombstone"; // XXX
+
+	dram_map_type(size_t n) : map(n)
+	{
+	}
+
+	void put(string_view key, string_view value)
+	{
+		container_type::accessor acc;
+
+		map.emplace(acc, std::piecewise_construct, std::forward_as_tuple(key.data(), key.size()), std::forward_as_tuple(value));
+		acc->second = value;
+	}
+
+	enum class element_status { alive, removed, not_found };
+
+	element_status get(string_view key, container_type::const_accessor &acc)
+	{
+		auto found = map.find(acc, key);
+
+		if (found) {
+			if (acc->second == tombstone)
+				return element_status::removed;
+			else
+				return element_status::alive;
+		}
+
+		return element_status::not_found;
+	}
+
+	/* Element exists in the dram map (alive or tombstone) */
+	bool exists(string_view key)
+	{
+		return map.count(string_type(key.data(), key.size())) == 0 ? false : true;
+	}
+
+	container_type::iterator begin()
+	{
+		return map.begin();
+	}
+
+	container_type::iterator end()
+	{
+		return map.end();
+	}
+
+	size_t size() const
+	{
+		return map.size();
+	}
+
+	container_type map;
+};
+
 // using map_type =
 
 struct pmem_type {
@@ -27,21 +153,7 @@ struct pmem_type {
 	uint64_t reserved[8];
 };
 
-static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
-
-class transaction : public ::pmem::kv::internal::transaction {
-public:
-	transaction(pmem::obj::pool_base &pop, map_type *container);
-	status put(string_view key, string_view value) final;
-	status remove(string_view key) final;
-	status commit() final;
-	void abort() final;
-
-private:
-	pmem::obj::pool_base &pop;
-	dram_log log;
-	map_type *container;
-};
+// static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
 
 } /* namespace new_map */
 } /* namespace internal */
@@ -60,21 +172,8 @@ public:
 	std::string name() final;
 
 	status count_all(std::size_t &cnt) final;
-	status count_above(string_view key, std::size_t &cnt) final;
-	status count_equal_above(string_view key, std::size_t &cnt) final;
-	status count_equal_below(string_view key, std::size_t &cnt) final;
-	status count_below(string_view key, std::size_t &cnt) final;
-	status count_between(string_view key1, string_view key2, std::size_t &cnt) final;
 
 	status get_all(get_kv_callback *callback, void *arg) final;
-	status get_above(string_view key, get_kv_callback *callback, void *arg) final;
-	status get_equal_above(string_view key, get_kv_callback *callback,
-			       void *arg) final;
-	status get_equal_below(string_view key, get_kv_callback *callback,
-			       void *arg) final;
-	status get_below(string_view key, get_kv_callback *callback, void *arg) final;
-	status get_between(string_view key1, string_view key2, get_kv_callback *callback,
-			   void *arg) final;
 
 	status exists(string_view key) final;
 
@@ -84,13 +183,14 @@ public:
 
 	status remove(string_view key) final;
 
-	internal::transaction *begin_tx() final;
-
-	internal::iterator_base *new_iterator() final;
-	internal::iterator_base *new_const_iterator() final;
-
 private:
 	using container_type = internal::radix::map_type;
+	using pmem_type = internal::new_map::pmem_type;
+
+	pmem_type *pmem_ptr;
+	uint64_t dram_capacity = 1024;
+	uint64_t log_size = 1024 * 1024;
+	uint64_t worker_threads = 4;
 
 	void Recover();
 	status iterate(typename container_type::const_iterator first,
@@ -99,52 +199,6 @@ private:
 
 	container_type *container;
 	std::unique_ptr<internal::config> config;
-};
-
-template <>
-class radix::iterator<true> : virtual public internal::iterator_base {
-	using container_type = radix::container_type;
-
-public:
-	radix_iterator(container_type *container);
-
-	status seek(string_view key) final;
-	status seek_lower(string_view key) final;
-	status seek_lower_eq(string_view key) final;
-	status seek_higher(string_view key) final;
-	status seek_higher_eq(string_view key) final;
-
-	status seek_to_first() final;
-	status seek_to_last() final;
-
-	status is_next() final;
-	status next() final;
-	status prev() final;
-
-	result<string_view> key() final;
-
-	result<pmem::obj::slice<const char *>> read_range(size_t pos, size_t n) final;
-
-protected:
-	container_type *container;
-	container_type::iterator it_;
-	pmem::obj::pool_base pop;
-};
-
-template <>
-class radix::iterator<false> : public radix::iterator<true> {
-	using container_type = radix::container_type;
-
-public:
-	radix_iterator(container_type *container);
-
-	result<pmem::obj::slice<char *>> write_range(size_t pos, size_t n) final;
-
-	status commit() final;
-	void abort() final;
-
-private:
-	std::vector<std::pair<std::string, size_t>> log;
 };
 
 } /* namespace kv */
