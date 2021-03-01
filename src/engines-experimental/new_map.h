@@ -6,6 +6,19 @@
 #include "../iterator.h"
 #include "../pmemobj_engine.h"
 
+#include <string>
+#include <list>
+
+#include <tbb/concurrent_hash_map.h>
+#include <tbb/concurrent_queue.h>
+
+#include <libpmemobj/action_base.h>
+
+#include <libpmemobj++/container/string.hpp>
+#include <libpmemobj++/container/concurrent_hash_map.hpp>
+
+#define ALIGN_UP(size, align) (((size) + (align) - 1) & ~((align) - 1))
+
 namespace pmem
 {
 namespace kv
@@ -75,49 +88,6 @@ public:
 	}
 };
 
-template <typename T>
-struct hazard_list {
-	hazard_list(){
-	}
-
-	template <typename Arg>
-	T* push_back(Arg &&a) {
-		std::unique_lock<std::mutex> lock(mtx);
-		list.push_back(std::forward<Arg>(a));
-		return &list.back();
-	}
-
-	std::mutex mtx;
-	std::list<T> list;
-};
-
-template <typename T>
-struct hazard_pointer {
-	hazard_pointer(hazard_list<std::atomic<T*>>& list, std::atomic<T*> &target): hazard(list.push_back()), target(target), list(list) {
-	}
-
-	T* acquire() {
-		while (true) {
-			auto ptr = target.load(std::memory_order_acquire);
-			hazard.store(ptr, std::memory_order_relaxed);
-			if (ptr == target.load(std::memory_order_acquire))
-				return ptr;
-		}
-	}
-
-	void release() {
-		hazard.store(nullptr, std::memory_order_release);
-	}
-
-	~hazard_pointer() {
-		// XXX - remove itself from the list?
-	}
-
-	std::atomic<T*> &hazard;
-	std::atomic<T*> &target;
-	hazard_list<std::atomic<T*>> &list;
-};
-
 using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
 
 // using pmem_map_type =
@@ -184,7 +154,7 @@ struct dram_map_type {
 	container_type map;
 };
 
-// using map_type =
+using map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
 
 struct pmem_type {
 	pmem_type() : map()
@@ -209,7 +179,7 @@ public:
 	new_map(std::unique_ptr<internal::config> cfg);
 	~new_map();
 
-	new_map(const radix &) = delete;
+	new_map(const new_map &) = delete;
 	new_map &operator=(const new_map &) = delete;
 
 	std::string name() final;
@@ -227,8 +197,9 @@ public:
 	status remove(string_view key) final;
 
 private:
-	using container_type = internal::radix::map_type;
+	using container_type = internal::new_map::map_type;
 	using pmem_type = internal::new_map::pmem_type;
+	using dram_map_type = internal::new_map::dram_map_type;
 
 	pmem_type *pmem_ptr;
 	uint64_t dram_capacity = 1024;
@@ -236,12 +207,85 @@ private:
 	uint64_t worker_threads = 4;
 
 	void Recover();
-	status iterate(typename container_type::const_iterator first,
-		       typename container_type::const_iterator last,
-		       get_kv_callback *callback, void *arg);
+
+	struct pmem_log {
+		pmem_log(obj::pool_base &pop, size_t size) {
+			pobj_action act;
+			auto p = (char*) pmemobj_direct(pmemobj_reserve(pop.handle(), &act, size, 0));
+			ptr = (char*) ALIGN_UP((uint64_t)p , 64ULL);
+			assert(ptr);
+			size = 0;
+		}
+
+		char* ptr;
+		size_t size = 0;
+	};
+
+	template <typename T>
+	struct hazard_list {
+		hazard_list(){
+		}
+
+		T* emplace() {
+			std::unique_lock<std::mutex> lock(mtx);
+			list.emplace_back();
+			return &list.back();
+		}
+
+		template <typename F>
+		void foreach(F&& f) {
+			std::unique_lock<std::mutex> lock(mtx);
+			for (auto &e : list)
+				f(e);
+		}
+
+		std::mutex mtx;
+		std::list<T> list;
+	};
+
+	template <typename T>
+	struct hazard_pointer {
+		hazard_pointer(hazard_list<std::atomic<T*>>& list): hazard(*list.emplace()) {
+		}
+
+		T* acquire(std::atomic<T*> &target) {
+			while (true) {
+				auto ptr = target.load(std::memory_order_acquire);
+				hazard.store(ptr, std::memory_order_relaxed);
+				if (ptr == target.load(std::memory_order_acquire))
+					return ptr;
+			}
+		}
+
+		void release() {
+			hazard.store(nullptr, std::memory_order_release);
+		}
+
+		~hazard_pointer() {
+			// XXX - remove itself from the list?
+		}
+
+		//hazard_list<std::atomic<T*>> &list;
+		std::atomic<T*> &hazard;
+	};
+
+	std::atomic<size_t> bg_cnt = 0;
+
+	std::atomic<dram_map_type*> index;
+	hazard_list<std::atomic<dram_map_type*>> hazards;
 
 	container_type *container;
 	std::unique_ptr<internal::config> config;
+
+	tbb::concurrent_queue<char*> worker_queue[128];
+
+	std::atomic<bool> is_shutting_down = false;
+
+	std::mutex bg_mtx;
+	std::condition_variable cv;
+
+	std::mutex client_mtx;
+	std::condition_variable client_cv;
 };
 
 } /* namespace kv */

@@ -49,6 +49,14 @@ new_map::new_map(std::unique_ptr<internal::config> cfg)
 
 new_map::~new_map()
 {
+	is_shutting_down.store(true);
+	cv.notify_one();
+
+	while(true) {
+		if (bg_cnt.load() == 0)
+			break;
+	}
+
 	LOG("Stopped ok");
 }
 
@@ -61,96 +69,30 @@ status new_map::count_all(std::size_t &cnt)
 {
 	LOG("count_all");
 	check_outside_tx();
-	cnt = container->size();
+
+	cnt = 0;
+	return get_all(
+		[](const char *k, size_t kb, const char *v, size_t vb, void *arg) {
+			auto size = static_cast<size_t *>(arg);
+			(*size)++;
+
+			return PMEMKV_STATUS_OK;
+		},
+		&cnt);
 
 	return status::OK;
 }
 
-template <typename It>
-static std::size_t size(It first, It last)
-{
-	auto dist = std::distance(first, last);
-	assert(dist >= 0);
-
-	return static_cast<std::size_t>(dist);
-}
-
-status new_map::count_above(string_view key, std::size_t &cnt)
-{
-	LOG("count_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->upper_bound(key);
-	auto last = container->end();
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_equal_above(string_view key, std::size_t &cnt)
-{
-	LOG("count_equal_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->lower_bound(key);
-	auto last = container->end();
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_equal_below(string_view key, std::size_t &cnt)
-{
-	LOG("count_equal_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->upper_bound(key);
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_below(string_view key, std::size_t &cnt)
-{
-	LOG("count_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->lower_bound(key);
-
-	cnt = size(first, last);
-
-	return status::OK;
-}
-
-status new_map::count_between(string_view key1, string_view key2, std::size_t &cnt)
-{
-	LOG("count_between for key1=" << key1.data() << ", key2=" << key2.data());
-	check_outside_tx();
-
-	if (key1.compare(key2) < 0) {
-		auto first = container->upper_bound(key1);
-		auto last = container->lower_bound(key2);
-
-		cnt = size(first, last);
-	} else {
-		cnt = 0;
-	}
-
-	return status::OK;
-}
-
-status new_map::iterate(typename container_type::const_iterator first,
-		      typename container_type::const_iterator last,
+template <typename Iterator, typename Pred>
+static status iterate(Iterator first, Iterator last, Pred &&pred,
 		      get_kv_callback *callback, void *arg)
 {
 	for (auto it = first; it != last; ++it) {
-		string_view key = it->key();
-		string_view value = it->value();
+		string_view key = it->first;
+		string_view value = it->second;
+
+		if (!pred(key, value))
+			continue;
 
 		auto ret =
 			callback(key.data(), key.size(), value.data(), value.size(), arg);
@@ -167,69 +109,26 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 	LOG("get_all");
 	check_outside_tx();
 
-	auto first = container->begin();
-	auto last = container->end();
+	static thread_local hazard_pointer<dram_map_type> hp(this->hazards);
+	auto index = hp.acquire(this->index);
 
-	return iterate(first, last, callback, arg);
-}
+	auto dram_pred = [](string_view, string_view v) {
+		return v != dram_map_type::tombstone;
+	};
 
-status new_map::get_above(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
+	auto pmem_pred = [&](string_view k, string_view v) {
+		return (!index->exists(k));
+	};
 
-	auto first = container->upper_bound(key);
-	auto last = container->end();
-
-	return iterate(first, last, callback, arg);
-}
-
-status new_map::get_equal_above(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_equal_above for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->lower_bound(key);
-	auto last = container->end();
-
-	return iterate(first, last, callback, arg);
-}
-
-status new_map::get_equal_below(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_equal_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->upper_bound(key);
-
-	return iterate(first, last, callback, arg);
-}
-
-status new_map::get_below(string_view key, get_kv_callback *callback, void *arg)
-{
-	LOG("get_below for key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
-
-	auto first = container->begin();
-	auto last = container->lower_bound(key);
-
-	return iterate(first, last, callback, arg);
-}
-
-status new_map::get_between(string_view key1, string_view key2, get_kv_callback *callback,
-			  void *arg)
-{
-	LOG("get_between for key1=" << key1.data() << ", key2=" << key2.data());
-	check_outside_tx();
-
-	if (key1.compare(key2) < 0) {
-		auto first = container->upper_bound(key1);
-		auto last = container->lower_bound(key2);
-		return iterate(first, last, callback, arg);
+	auto s = iterate(index->begin(), index->end(), dram_pred, callback, arg);
+	if (s != status::OK) {
+		hp.release();
+		return s;
 	}
 
-	return status::OK;
+	auto ret = iterate(container->begin(), container->end(), pmem_pred, callback, arg);
+	hp.release();
+	return ret;
 }
 
 status new_map::exists(string_view key)
@@ -237,23 +136,41 @@ status new_map::exists(string_view key)
 	LOG("exists for key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 
-	return container->find(key) != container->end() ? status::OK : status::NOT_FOUND;
+	return get(
+		key, [](const char *, size_t, void *) {}, nullptr);
 }
 
 status new_map::get(string_view key, get_v_callback *callback, void *arg)
 {
-	LOG("get key=" << std::string(key.data(), key.size()));
-	check_outside_tx();
+	// XXX - enumerable_thread_specific?
+	static thread_local hazard_pointer hp(this->hazards);
+	auto index = hp.acquire(this->index);
 
-	auto it = container->find(key);
-	if (it != container->end()) {
-		auto value = string_view(it->value());
-		callback(value.data(), value.size(), arg);
-		return status::OK;
+	{
+		dram_map_type::const_accessor_type acc;
+		auto s = index->get(key, acc);
+		if (s == dram_map_type::element_status::alive) {
+			callback(acc->second.data(), acc->second.size(), arg);
+
+			hp.release();
+			return status::OK;
+		} else if (s == dram_map_type::element_status::removed) {
+			hp.release();
+			return status::NOT_FOUND;
+		}
 	}
 
-	LOG("  key not found");
-	return status::NOT_FOUND;
+	container_type::const_accessor result;
+	auto found = container->find(result, key);
+	if (!found) {
+		hp.release();
+		return status::NOT_FOUND;
+	}
+
+	callback(result->second.c_str(), result->second.size(), arg);
+	hp.release();
+
+	return status::OK;
 }
 
 status new_map::put(string_view key, string_view value)
@@ -262,13 +179,47 @@ status new_map::put(string_view key, string_view value)
 		       << ", value.size=" << std::to_string(value.size()));
 	check_outside_tx();
 
-	auto result = container->try_emplace(key, value);
+	static thread_local hazard_pointer hp(this->hazards);
+	static thread_local pmem_log log(pmpool, this->log_size);
 
-	if (result.second == false) {
-		pmem::obj::transaction::run(pmpool,
-					    [&] { result.first.assign_val(value); });
+	while (true) {
+		auto index = hp.acquire(this->index);
+		auto log_pos = log.ptr + log.size;
+
+		if (index->size() >= this->dram_capacity) {
+			cv.notify_one();
+
+			log.size = 0;
+			hp.release();
+
+			std::unique_lock<std::mutex> lock(client_mtx);
+			client_cv.wait(lock, [&]{
+				// XXX - fix this, use hazard pointer?
+				return this->index.load(std::memory_order_relaxed)->size() < this->dram_capacity;
+			});
+
+			continue;
+			//container->insert_or_assign(key, value);
+		} else {
+			auto len = key.size() + value.size() + 16;
+			char* data = new char[len];
+			
+			*((uint64_t*)data) = key.size();
+			*((uint64_t*)(data + 8)) = value.size();
+			memcpy(data + 16, key.data(), key.size());
+			memcpy(data + 16 + key.size(), value.data(), value.size());
+
+			pmemobj_memcpy(pmpool.handle(), log_pos, data, len, PMEMOBJ_F_MEM_NONTEMPORAL);
+			log.size += len;
+			log.size = ALIGN_UP(log.size, 64ULL);
+
+			index->put(key, string_view(log_pos + 16 + key.size(), value.size()));
+
+			worker_queue[fast_hash(key.size(), key.data()) & (this->worker_threads - 1)].emplace(data);
+			hp.release();
+			break;
+		}
 	}
-
 	return status::OK;
 }
 
@@ -277,19 +228,7 @@ status new_map::remove(string_view key)
 	LOG("remove key=" << std::string(key.data(), key.size()));
 	check_outside_tx();
 
-	auto it = container->find(key);
-
-	if (it == container->end())
-		return status::NOT_FOUND;
-
-	container->erase(it);
-
-	return status::OK;
-}
-
-internal::transaction *new_map::begin_tx()
-{
-	return new internal::new_map::transaction(pmpool, container);
+	return put(key, dram_map_type::tombstone);
 }
 
 void new_map::Recover()
@@ -308,6 +247,8 @@ void new_map::Recover()
 		});
 	}
 
+	container = &pmem_ptr->map;
+
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
 	if (dram_capacity)
 		this->dram_capacity = std::stoi(dram_capacity);
@@ -318,7 +259,83 @@ void new_map::Recover()
 
 	auto worker_threads = std::getenv("BG_THREADS");
 	if (worker_threads)
-		this->bg_threads = std::stoi(worker_threads);
+		this->worker_threads = std::stoi(worker_threads);
+
+	index = new dram_map_type(this->dram_capacity * 2);
+
+	for (int i = 0; i < this->worker_threads; i++) {
+		std::thread([&, i=i]{
+			bg_cnt++;
+			while (true) {
+				if (is_shutting_down.load()) {
+					bg_cnt--;
+					return;
+				}
+
+				char* val;
+				if (!worker_queue[i].try_pop(val))
+					continue;
+
+				auto k_size = *((uint64_t*)val);
+				auto v_size = *((uint64_t*) (val + 8));
+				string_view k(val + 16, k_size);
+				string_view v(val + 16 + k_size, v_size);
+
+				if (v == dram_map_type::tombstone)
+					container->erase(k);
+				else
+					container->insert_or_assign(k, v);
+
+				delete val;
+			}
+		}).detach();
+	}
+
+	std::thread([&]{
+		bg_cnt++;
+		while (true) {
+			std::unique_lock<std::mutex> lock(bg_mtx);
+			cv.wait(lock, [&]{
+				return is_shutting_down.load() || index.load(std::memory_order_relaxed)->size() >= this->dram_capacity;
+			});
+
+			if (is_shutting_down.load()) {
+				bg_cnt--;
+				return;
+			}
+
+			while(true) {
+				bool spin = false;
+				for (int i = 0; i < this->worker_threads; i++) {
+					if (worker_queue[i].unsafe_size() != 0)
+						spin = true;
+				}
+
+				if (!spin)
+					break;
+			}
+
+			// XXX - wait on all worker threads to finish
+
+			auto old_index = index.load(std::memory_order_relaxed);
+			index.store(new dram_map_type(this->dram_capacity));
+
+			client_cv.notify_all();
+
+			while(true) {
+				size_t in_use = 0;
+				hazards.foreach([&](std::atomic<dram_map_type*> &ptr){
+					if (ptr.load(std::memory_order_relaxed) == old_index)
+						in_use++;
+				});
+
+				if (in_use == 0)
+					break;
+			};
+
+			delete old_index;
+		}
+	}).detach();
 }
 
 } // namespace kv
