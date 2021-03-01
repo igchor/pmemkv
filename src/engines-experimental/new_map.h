@@ -16,6 +16,8 @@
 
 #include <libpmemobj++/container/string.hpp>
 #include <libpmemobj++/container/concurrent_hash_map.hpp>
+#include <libpmemobj++/experimental/inline_string.hpp>
+#include <libpmemobj++/experimental/radix_tree.hpp>
 
 #define ALIGN_UP(size, align) (((size) + (align) - 1) & ~((align) - 1))
 
@@ -88,12 +90,6 @@ public:
 	}
 };
 
-using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
-
-// using pmem_map_type =
-// pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
-// 					    pmem::obj::experimental::inline_string>;
-
 struct dram_map_type {
 	using container_type =
 		tbb::concurrent_hash_map<string_type, string_view, dram_string_hasher>;
@@ -154,7 +150,9 @@ struct dram_map_type {
 	container_type map;
 };
 
-using map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
+// using map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
+using map_type = pmem::obj::experimental::radix_tree<pmem::obj::experimental::inline_string,
+					    pmem::obj::experimental::inline_string>;
 
 struct pmem_type {
 	pmem_type() : map()
@@ -162,7 +160,7 @@ struct pmem_type {
 		std::memset(reserved, 0, sizeof(reserved));
 	}
 
-	map_type map;
+	obj::persistent_ptr<map_type> map[128];
 	uint64_t reserved[8];
 };
 
@@ -197,7 +195,6 @@ public:
 	status remove(string_view key) final;
 
 private:
-	using container_type = internal::new_map::map_type;
 	using pmem_type = internal::new_map::pmem_type;
 	using dram_map_type = internal::new_map::dram_map_type;
 
@@ -274,7 +271,6 @@ private:
 	std::atomic<dram_map_type*> index;
 	hazard_list<std::atomic<dram_map_type*>> hazards;
 
-	container_type *container;
 	std::unique_ptr<internal::config> config;
 
 	tbb::concurrent_queue<char*> worker_queue[128];

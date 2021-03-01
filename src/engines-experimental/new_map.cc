@@ -84,7 +84,7 @@ status new_map::count_all(std::size_t &cnt)
 }
 
 template <typename Iterator, typename Pred>
-static status iterate(Iterator first, Iterator last, Pred &&pred,
+static status iterate_dram(Iterator first, Iterator last, Pred &&pred,
 		      get_kv_callback *callback, void *arg)
 {
 	for (auto it = first; it != last; ++it) {
@@ -104,10 +104,42 @@ static status iterate(Iterator first, Iterator last, Pred &&pred,
 	return status::OK;
 }
 
+template <typename Iterator, typename Pred>
+static status iterate_pmem(Iterator first, Iterator last, Pred &&pred,
+		      get_kv_callback *callback, void *arg)
+{
+	for (auto it = first; it != last; ++it) {
+		string_view key = it->key();
+		string_view value = it->value();
+
+		if (!pred(key, value))
+			continue;
+
+		auto ret =
+			callback(key.data(), key.size(), value.data(), value.size(), arg);
+
+		if (ret != 0)
+			return status::STOPPED_BY_CB;
+	}
+
+	return status::OK;
+}
+
 status new_map::get_all(get_kv_callback *callback, void *arg)
 {
 	LOG("get_all");
 	check_outside_tx();
+
+	while(true) {
+		bool spin = false;
+		for (int i = 0; i < this->worker_threads; i++) {
+			if (worker_queue[i].unsafe_size() != 0)
+				spin = true;
+	}
+
+	if (!spin)
+		break;
+}
 
 	static thread_local hazard_pointer<dram_map_type> hp(this->hazards);
 	auto index = hp.acquire(this->index);
@@ -120,15 +152,22 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 		return (!index->exists(k));
 	};
 
-	auto s = iterate(index->begin(), index->end(), dram_pred, callback, arg);
+	auto s = iterate_dram(index->begin(), index->end(), dram_pred, callback, arg);
 	if (s != status::OK) {
 		hp.release();
 		return s;
 	}
 
-	auto ret = iterate(container->begin(), container->end(), pmem_pred, callback, arg);
+	for (int i = 0; i < this->worker_threads; i++){
+		auto ret = iterate_pmem(pmem_ptr->map[i]->begin(), pmem_ptr->map[i]->end(), pmem_pred, callback, arg);
+		if (s != status::OK) {
+			hp.release();
+			return s;
+		}
+	}
+	
 	hp.release();
-	return ret;
+	return status::OK;
 }
 
 status new_map::exists(string_view key)
@@ -160,14 +199,16 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 		}
 	}
 
-	container_type::const_accessor result;
-	auto found = container->find(result, key);
-	if (!found) {
+	//container_type::const_accessor result;
+	auto &c = pmem_ptr->map[fast_hash(key.size(), key.data()) & (this->worker_threads - 1)];
+
+	auto found = c->find(key);
+	if (found == c->end()) {
 		hp.release();
 		return status::NOT_FOUND;
 	}
 
-	callback(result->second.c_str(), result->second.size(), arg);
+	callback(found->value().data(), found->value().size(), arg);
 	hp.release();
 
 	return status::OK;
@@ -244,10 +285,12 @@ void new_map::Recover()
 					.raw();
 			pmem_ptr = static_cast<internal::new_map::pmem_type *>(
 				pmemobj_direct(*root_oid));
+
+			for (int i = 0; i < 128; i++) {
+				pmem_ptr->map[i] = obj::make_persistent<internal::new_map::map_type>();
+			}
 		});
 	}
-
-	container = &pmem_ptr->map;
 
 	auto dram_capacity = std::getenv("DRAM_CAPACITY");
 	if (dram_capacity)
@@ -282,9 +325,9 @@ void new_map::Recover()
 				string_view v(val + 16 + k_size, v_size);
 
 				if (v == dram_map_type::tombstone)
-					container->erase(k);
+					pmem_ptr->map[i]->erase(k);
 				else
-					container->insert_or_assign(k, v);
+					pmem_ptr->map[i]->insert_or_assign(k, v);
 
 				delete val;
 			}
@@ -314,8 +357,6 @@ void new_map::Recover()
 				if (!spin)
 					break;
 			}
-
-			// XXX - wait on all worker threads to finish
 
 			auto old_index = index.load(std::memory_order_relaxed);
 			index.store(new dram_map_type(this->dram_capacity));
