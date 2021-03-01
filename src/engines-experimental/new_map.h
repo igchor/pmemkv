@@ -75,6 +75,49 @@ public:
 	}
 };
 
+template <typename T>
+struct hazard_list {
+	hazard_list(){
+	}
+
+	template <typename Arg>
+	T* push_back(Arg &&a) {
+		std::unique_lock<std::mutex> lock(mtx);
+		list.push_back(std::forward<Arg>(a));
+		return &list.back();
+	}
+
+	std::mutex mtx;
+	std::list<T> list;
+};
+
+template <typename T>
+struct hazard_pointer {
+	hazard_pointer(hazard_list<std::atomic<T*>>& list, std::atomic<T*> &target): hazard(list.push_back()), target(target), list(list) {
+	}
+
+	T* acquire() {
+		while (true) {
+			auto ptr = target.load(std::memory_order_acquire);
+			hazard.store(ptr, std::memory_order_relaxed);
+			if (ptr == target.load(std::memory_order_acquire))
+				return ptr;
+		}
+	}
+
+	void release() {
+		hazard.store(nullptr, std::memory_order_release);
+	}
+
+	~hazard_pointer() {
+		// XXX - remove itself from the list?
+	}
+
+	std::atomic<T*> &hazard;
+	std::atomic<T*> &target;
+	hazard_list<std::atomic<T*>> &list;
+};
+
 using pmem_map_type = obj::concurrent_hash_map<obj::string, obj::string, string_hasher>;
 
 // using pmem_map_type =
