@@ -9,7 +9,9 @@
 
 #include "engine.h"
 #include "libpmemkv.h"
+
 #include <libpmemobj++/pool.hpp>
+#include <libpmemobj++/pexceptions.hpp>
 
 namespace pmem
 {
