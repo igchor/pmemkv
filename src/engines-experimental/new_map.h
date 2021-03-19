@@ -9,6 +9,8 @@
 #include <string>
 #include <list>
 
+#include <chrono>
+
 #include <tbb/concurrent_hash_map.h>
 #include <tbb/concurrent_queue.h>
 
@@ -91,8 +93,9 @@ public:
 };
 
 struct dram_map_type {
+	// XXX - change key type, store hash in dram for faster lookup, rest on pmem
 	using container_type =
-		tbb::concurrent_hash_map<string_type, string_type, dram_string_hasher>;
+		tbb::concurrent_hash_map<string_type, std::atomic<const char*>, dram_string_hasher>;
 	using accessor_type = container_type::accessor;
 	using const_accessor_type = container_type::const_accessor;
 
@@ -102,12 +105,14 @@ struct dram_map_type {
 	{
 	}
 
-	void put(string_view key, string_view value)
+	std::atomic<const char*>* put(string_view key, const char* value)
 	{
 		container_type::accessor acc;
 
 		map.emplace(acc, std::piecewise_construct, std::forward_as_tuple(key.data(), key.size()), std::forward_as_tuple(value));
-		acc->second = value;
+		acc->second.store(value, std::memory_order_release);
+
+		return &acc->second;
 	}
 
 	enum class element_status { alive, removed, not_found };
@@ -117,7 +122,13 @@ struct dram_map_type {
 		auto found = map.find(acc, key);
 
 		if (found) {
-			if (acc->second == tombstone)
+			auto log_pos = acc->second.load(std::memory_order_acquire);
+
+			auto k_size = *((uint64_t*)log_pos);
+			auto v_size = *((uint64_t*) (log_pos + 8));
+
+			string_view value = string_view(log_pos + 24 + k_size, v_size);
+			if (value == tombstone)
 				return element_status::removed;
 			else
 				return element_status::alive;
@@ -217,6 +228,9 @@ private:
 
 		char* ptr;
 		size_t size = 0;
+
+		std::atomic<size_t> n_reads = 0;
+		size_t n_writes = 0;
 	};
 
 	template <typename T>
@@ -277,8 +291,15 @@ private:
 
 	std::unique_ptr<internal::config> config;
 
+	struct message {
+		char* log_pos;
+		std::atomic<size_t> *n_reads;
+		std::atomic<const char*>* value_ptr;
+		std::chrono::time_point<std::chrono::steady_clock> timestamp;
+	};
+
 	// XXX - make 128 a parameter
-	tbb::concurrent_queue<char*> worker_queue[128];
+	tbb::concurrent_queue<message> worker_queue[128];
 
 	std::atomic<bool> is_shutting_down = false;
 
