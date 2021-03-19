@@ -1,9 +1,11 @@
 
 name: pmemkv-other
 on:
-  schedule:
-    # run this job at 01:00 UTC everyday
-    - cron:  '0 1 * * *'
+  push:
+  pull_request:
+  release:
+    types:
+      - created
 
 env:
   REPO:           pmemkv
