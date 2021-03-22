@@ -133,16 +133,16 @@ status new_map::get_all(get_kv_callback *callback, void *arg)
 	LOG("get_all");
 	check_outside_tx();
 
-	while(true) {
-		bool spin = false;
-		for (int i = 0; i < this->worker_threads; i++) {
-			if (!worker_queue[i].empty())
-				spin = true;
-	}
+// 	while(true) {
+// 		bool spin = false;
+// 		for (int i = 0; i < this->worker_threads; i++) {
+// 			if (!worker_queue[i].empty())
+// 				spin = true;
+// 	}
 
-	if (!spin)
-		break;
-}
+// 	if (!spin)
+// 		break;
+// }
 
 	static thread_local hazard_pointer hp(this->hazards, this->index);
 	auto index = hp.acquire();
@@ -208,6 +208,26 @@ status new_map::get(string_view key, get_v_callback *callback, void *arg)
 	return status::OK;
 }
 
+static std::atomic<size_t>& get_cnt() {
+	static std::atomic<size_t> t_counter = 0;
+	return t_counter;
+}
+
+struct t_cnt {
+	t_cnt(std::atomic<size_t> &cnt): cnt(cnt) {
+		id = cnt.fetch_add(1);
+	}	
+
+	~t_cnt() {
+		cnt.fetch_sub(1);
+	}
+
+	size_t get() { return id; }
+
+	std::atomic<size_t> &cnt;
+	size_t id;
+};
+
 status new_map::put(string_view key, string_view value)
 {
 	LOG("put key=" << std::string(key.data(), key.size())
@@ -215,16 +235,15 @@ status new_map::put(string_view key, string_view value)
 	check_outside_tx();
 
 	static thread_local hazard_pointer index_hp(this->hazards, this->index);
-	static thread_local pmem_log log(pmpool, this->log_size);
+	static thread_local t_cnt cnt(get_cnt());
 
 	while (true) {
 		auto index = index_hp.acquire();
-		auto log_pos = log.ptr + log.size;
 
 		if (index->size() >= this->dram_capacity) {
 			cv.notify_one();
 
-			log.size = 0;
+			// XXX - wait for consumers to finish, keep read/written counters?
 			index.reset(nullptr);
 
 			std::unique_lock<std::mutex> lock(client_mtx);
@@ -239,8 +258,25 @@ status new_map::put(string_view key, string_view value)
 			auto len = key.size() + value.size() + 16;
 			len = ALIGN_UP(len, 64ULL);
 
-			// XXX - do not allocate?, just copy to pmem
-			char* data = new char[len];
+			auto hash = fast_hash(key.size(), key.data()) & (this->worker_threads - 1);
+
+			bool exists = false;
+			auto &workers = ets.local(exists);
+
+			if (!exists) {
+				workers = std::vector<ringbuf_worker_t*>(this->worker_threads);
+				for (int i = 0; i < this->worker_threads; i++) {
+					workers[i] = ringbuf_register(r[i], cnt.get());
+				}
+			}
+
+retry:
+			auto off = ringbuf_acquire(r[hash], workers[hash], len);
+			if (off == -1)
+				goto retry;
+			
+			auto log_pos = log[hash] + off;
+			char data[256];
 			
 			// XXX - refactor this, create some structure?
 			*((uint64_t*)data) = key.size();
@@ -249,14 +285,13 @@ status new_map::put(string_view key, string_view value)
 			memcpy(data + 16 + key.size(), value.data(), value.size());
 
 			pmemobj_memcpy(pmpool.handle(), log_pos, data, len, PMEMOBJ_F_MEM_NONTEMPORAL);
-			log.size += len;
 
 			// Since data from log can be overwritten, we must keep a copy in DRAM
 			index->put(key, value);
-			worker_queue[fast_hash(key.size(), key.data()) & (this->worker_threads - 1)].emplace(log_pos);
-			bg_cv[fast_hash(key.size(), key.data()) & (this->worker_threads - 1)].notify_one();
 
-			delete data;
+			ringbuf_produce(r[hash], workers[hash]);
+
+			bg_cv[fast_hash(key.size(), key.data()) & (this->worker_threads - 1)].notify_one();
 
 			return status::OK;
 		}
@@ -306,14 +341,36 @@ void new_map::Recover()
 
 	index = new dram_map_type(this->dram_capacity * 2);
 
+	size_t ringbuf_obj_size;
+	ringbuf_get_sizes(128, &ringbuf_obj_size, NULL);
+
+	pobj_action act[128];
+
+	for (int i = 0; i < this->worker_threads; i++) {
+		r[i] = (ringbuf_t*) malloc(ringbuf_obj_size);
+		auto ret = ringbuf_setup(r[i], 128, this->log_size);
+		if (ret != 0)
+			throw std::runtime_error("ringbuf setup");
+
+		log[i] = (char*) pmemobj_direct(pmemobj_reserve(pmpool.handle(), &act[i], this->log_size * 256, 0));
+		log[i] = (char*) ALIGN_UP((uint64_t)log[i] , 64ULL);
+	}
+
+	if (pmemobj_publish(pmpool.handle(), &act[0], this->worker_threads))
+		throw std::runtime_error("pmemobj_publish");
+
 	for (int i = 0; i < this->worker_threads; i++) {
 		std::thread([&, i=i]{
 			bg_cnt++;
 			while (true) {
-				std::unique_lock<std::mutex> lock(bg_cv_mtx[i]);
-				bg_cv[i].wait(lock, [&]{
-					return !worker_queue[i].empty() || is_shutting_down.load();
-				});
+				// std::unique_lock<std::mutex> lock(bg_cv_mtx[i]);
+
+				// if (is_shutting_down.load()) {
+				// 	bg_cnt--;
+				// 	return;
+				// }
+
+				// bg_cv[i].wait(lock);
 
 				if (is_shutting_down.load()) {
 					bg_cnt--;
@@ -322,10 +379,12 @@ void new_map::Recover()
 
 
 				while(true) {
-					// XXX - once here, we can insert all items from queue in one tx?
-					char* val;
-					if (!worker_queue[i].try_pop(val))
+					size_t off;
+					auto len = ringbuf_consume(r[i], &off);
+					if (len == 0)
 						break;
+
+					auto val = log[i] + off;
 
 					// XXX - wrap this logic in some function or structure
 					auto k_size = *((uint64_t*)val);
@@ -337,9 +396,9 @@ void new_map::Recover()
 						pmem_ptr->map[i]->erase(k);
 					else
 						pmem_ptr->map[i]->insert_or_assign(k, v);
-				}
 
-				// XXX - notify client thread that data was consumed ?
+					ringbuf_release(r[i], len);
+				}
 			}
 		}).detach();
 	}
@@ -357,17 +416,17 @@ void new_map::Recover()
 				return;
 			}
 
-			// wait for all bg threads to finish
-			while(true) {
-				bool spin = false;
-				for (int i = 0; i < this->worker_threads; i++) {
-					if (!worker_queue[i].empty())
-						spin = true;
-				}
+			// // wait for all bg threads to finish
+			// while(true) {
+			// 	bool spin = false;
+			// 	for (int i = 0; i < this->worker_threads; i++) {
+			// 		if (!worker_queue[i].empty())
+			// 			spin = true;
+			// 	}
 
-				if (!spin)
-					break;
-			}
+			// 	if (!spin)
+			// 		break;
+			// }
 
 			// now, it's safe to replace dram index (all elements are already on pmem)
 			auto old_index = index.load(std::memory_order_relaxed);

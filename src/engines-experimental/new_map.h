@@ -5,12 +5,14 @@
 
 #include "../iterator.h"
 #include "../pmemobj_engine.h"
+#include "../ringbuf.h"
 
 #include <string>
 #include <list>
 
 #include <tbb/concurrent_hash_map.h>
 #include <tbb/concurrent_queue.h>
+#include <tbb/enumerable_thread_specific.h>
 
 #include <libpmemobj/action_base.h>
 
@@ -275,10 +277,13 @@ private:
 	std::atomic<dram_map_type*> index;
 	hazard_list<std::atomic<dram_map_type*>> hazards;
 
+	tbb::enumerable_thread_specific<std::vector<ringbuf_worker_t*>> ets;
+
 	std::unique_ptr<internal::config> config;
 
 	// XXX - make 128 a parameter
-	tbb::concurrent_queue<char*> worker_queue[128];
+	ringbuf_t *r[128];
+	char *log[128];
 
 	std::atomic<bool> is_shutting_down = false;
 

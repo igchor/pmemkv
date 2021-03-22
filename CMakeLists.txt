@@ -95,6 +95,9 @@ set(SOURCE_FILES
 	src/out.h
 	src/iterator.h
 	src/iterator.cc
+	src/ringbuf.c
+	src/ringbuf.h
+	src/utils.h
 )
 # Add each engine source separately
 if(ENGINE_CMAP)
