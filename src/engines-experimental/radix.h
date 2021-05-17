@@ -12,6 +12,11 @@
 
 #include <libpmemobj++/experimental/inline_string.hpp>
 #include <libpmemobj++/experimental/radix_tree.hpp>
+#include <tbb/concurrent_queue.h>
+
+#include <atomic>
+
+#include <libpmemobj++/container/mpsc_queue.hpp>
 
 #include <mutex>
 #include <shared_mutex>
@@ -36,7 +41,8 @@ struct pmem_type {
 	}
 
 	map_type map;
-	uint64_t reserved[8];
+	pmem::obj::persistent_ptr<char[]> log;
+	uint64_t reserved[6];
 };
 
 static_assert(sizeof(pmem_type) == sizeof(map_type) + 64, "");
@@ -53,6 +59,36 @@ private:
 	pmem::obj::pool_base &pop;
 	dram_log log;
 	map_type *container;
+};
+
+template <typename T>
+struct timestamped_entry {
+	template <typename... Args>
+	timestamped_entry(Args &&... args) : data(std::forward<Args>(args)...)
+	{
+		timestamp.store(current_timestamp());
+	}
+
+	template <typename K>
+	timestamped_entry &operator=(K &&rhs)
+	{
+		this->data = std::forward<K>(rhs);
+		this->timestamp.store(current_timestamp());
+		return *this;
+	}
+
+// private:
+	uint64_t current_timestamp()
+	{
+		auto count = std::chrono::duration_cast<std::chrono::microseconds>(
+			       std::chrono::steady_clock::now().time_since_epoch())
+			.count();
+
+		return static_cast<uint64_t>(count);
+	}
+
+	T data;
+	std::atomic<size_t> timestamp;
 };
 
 } /* namespace radix */
@@ -126,6 +162,105 @@ private:
 	std::unique_ptr<internal::config> config;
 };
 
+class heterogenous_radix : public pmemobj_engine_base<internal::radix::pmem_type> {
+public:
+	heterogenous_radix(std::unique_ptr<internal::config> cfg);
+	~heterogenous_radix();
+
+	heterogenous_radix(const heterogenous_radix&) = delete;
+	heterogenous_radix& operator=(const heterogenous_radix&) = delete;
+
+	std::string name() final;
+
+	status count_all(std::size_t &cnt) final;
+
+	status get_all(get_kv_callback *callback, void *arg) final;
+
+	status exists(string_view key) final;
+
+	status put(string_view key, string_view value) final;
+
+	status remove(string_view k) final;
+
+	status get(string_view key, get_v_callback *callback, void *arg) final;
+
+private:
+	using container_type = internal::radix::map_type;
+	using dram_map_type = std::map<std::string, internal::radix::timestamped_entry<std::string>>;
+	using pmem_queue_type = pmem::obj::experimental::mpsc_queue;
+	using pmem_queue_worker_type = pmem_queue_type::worker;
+	dram_map_type map;
+
+	struct queue_entry {
+		queue_entry(size_t timestamp, dram_map_type::mapped_type *dram_entry, string_view key, string_view value): timestamp(timestamp), dram_entry(dram_entry), key_size(key.size()), value_size(value.size()) {
+			memcpy(reinterpret_cast<char*>(this + 1), key.data(), key.size());
+			memcpy(reinterpret_cast<char*>(this + 1) + key.size(), value.data(), value.size());
+		}
+
+		static size_t size(string_view key, string_view value) {
+			return sizeof(queue_entry) + key.size() + value.size();
+		}
+
+		string_view key() const {
+			return string_view(reinterpret_cast<const char*>(this + 1), key_size);
+		}
+
+		string_view value() const {
+			return string_view(reinterpret_cast<const char*>(this + 1) + key_size, value_size);
+		}
+
+		size_t timestamp;
+		dram_map_type::mapped_type *dram_entry;
+		size_t key_size;
+		size_t value_size;
+	};
+
+	size_t dram_size;
+
+	std::unique_ptr<pmem_queue_type> queue;
+	std::unique_ptr<pmem_queue_worker_type> worker;
+
+	std::atomic<bool> stopped;
+	std::thread bg_thread;
+
+	pmem::obj::pool_base pop;
+
+	tbb::concurrent_bounded_queue<std::pair<string_view, size_t>>
+		consumed_dram_entries; // XXX - string_view - must be protected by EBR
+
+	container_type *container;
+	std::unique_ptr<internal::config> config;
+
+	void bg_work()
+	{
+		while (!stopped.load()) {
+			auto acc = queue->consume();
+			for (auto str_v : acc) {
+				auto *e = reinterpret_cast<const queue_entry*>(str_v.data());
+
+				if (e->timestamp !=
+				    e->dram_entry->timestamp.load())
+					continue;
+
+				// XXX - make sure tx does not abort and use
+				// defer_free
+				if (e->value() == tombstone()) {
+					// container->erase(e->key());
+				} else {
+					container->insert_or_assign(e->key(), e->value());
+				}
+
+				consumed_dram_entries.emplace(e->key(), e->timestamp);
+			}
+		}
+	}
+
+	static string_view tombstone()
+	{
+		return "tombstone"; // XXX
+	}
+};
+
 template <>
 class radix::radix_iterator<true> : public internal::iterator_base {
 	using container_type = radix::container_type;
@@ -178,8 +313,15 @@ public:
 	create(std::unique_ptr<internal::config> cfg) override
 	{
 		check_config_null(get_name(), cfg);
-		return std::unique_ptr<engine_base>(new radix(std::move(cfg)));
+		return std::unique_ptr<engine_base>(new heterogenous_radix(std::move(cfg)));
+		// uint64_t dram_caching;
+		// if (cfg->get_uint64("dram_caching", &dram_caching) && dram_caching) {
+		// 	return std::unique_ptr<engine_base>(new heterogenous_radix(std::move(cfg)));
+		// } else {
+		// 	return std::unique_ptr<engine_base>(new radix(std::move(cfg)));
+		// }
 	};
+
 	std::string get_name() override
 	{
 		return "radix";
