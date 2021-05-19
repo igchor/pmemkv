@@ -64,31 +64,41 @@ private:
 template <typename T>
 struct timestamped_entry {
 	template <typename... Args>
-	timestamped_entry(Args &&... args) : data(std::forward<Args>(args)...)
+	timestamped_entry(Args &&... args) : data_(std::forward<Args>(args)...)
 	{
-		timestamp.store(current_timestamp());
+		timestamp_.store(current_timestamp(), std::memory_order_release);
 	}
 
 	template <typename K>
 	timestamped_entry &operator=(K &&rhs)
 	{
-		this->data = std::forward<K>(rhs);
-		this->timestamp.store(current_timestamp());
+		this->data_ = std::forward<K>(rhs);
+		this->timestamp_.store(current_timestamp(), std::memory_order_release);
 		return *this;
 	}
 
-// private:
+	T &data()
+	{
+		return data_;
+	}
+
+	size_t timestamp()
+	{
+		return timestamp_.load(std::memory_order_acquire);
+	}
+
+private:
+	T data_;
+	std::atomic<size_t> timestamp_;
+
 	uint64_t current_timestamp()
 	{
 		auto count = std::chrono::duration_cast<std::chrono::microseconds>(
-			       std::chrono::steady_clock::now().time_since_epoch())
-			.count();
+				     std::chrono::steady_clock::now().time_since_epoch())
+				     .count();
 
 		return static_cast<uint64_t>(count);
 	}
-
-	T data;
-	std::atomic<size_t> timestamp;
 };
 
 } /* namespace radix */
@@ -167,8 +177,8 @@ public:
 	heterogenous_radix(std::unique_ptr<internal::config> cfg);
 	~heterogenous_radix();
 
-	heterogenous_radix(const heterogenous_radix&) = delete;
-	heterogenous_radix& operator=(const heterogenous_radix&) = delete;
+	heterogenous_radix(const heterogenous_radix &) = delete;
+	heterogenous_radix &operator=(const heterogenous_radix &) = delete;
 
 	std::string name() final;
 
@@ -186,27 +196,43 @@ public:
 
 private:
 	using container_type = internal::radix::map_type;
-	using dram_map_type = std::map<std::string, internal::radix::timestamped_entry<std::string>>;
+	using dram_map_type =
+		std::map<std::string, internal::radix::timestamped_entry<std::string>,
+			 std::less<void>>;
 	using pmem_queue_type = pmem::obj::experimental::mpsc_queue;
 	using pmem_queue_worker_type = pmem_queue_type::worker;
 	dram_map_type map;
 
 	struct queue_entry {
-		queue_entry(size_t timestamp, dram_map_type::mapped_type *dram_entry, string_view key, string_view value): timestamp(timestamp), dram_entry(dram_entry), key_size(key.size()), value_size(value.size()) {
-			memcpy(reinterpret_cast<char*>(this + 1), key.data(), key.size());
-			memcpy(reinterpret_cast<char*>(this + 1) + key.size(), value.data(), value.size());
+		queue_entry(size_t timestamp, dram_map_type::mapped_type *dram_entry,
+			    string_view key, string_view value)
+		    : timestamp(timestamp),
+		      dram_entry(dram_entry),
+		      key_size(key.size()),
+		      value_size(value.size())
+		{
+			memcpy(reinterpret_cast<char *>(this + 1), key.data(),
+			       key.size());
+			memcpy(reinterpret_cast<char *>(this + 1) + key.size(),
+			       value.data(), value.size());
 		}
 
-		static size_t size(string_view key, string_view value) {
+		static size_t size(string_view key, string_view value)
+		{
 			return sizeof(queue_entry) + key.size() + value.size();
 		}
 
-		string_view key() const {
-			return string_view(reinterpret_cast<const char*>(this + 1), key_size);
+		string_view key() const
+		{
+			return string_view(reinterpret_cast<const char *>(this + 1),
+					   key_size);
 		}
 
-		string_view value() const {
-			return string_view(reinterpret_cast<const char*>(this + 1) + key_size, value_size);
+		string_view value() const
+		{
+			return string_view(reinterpret_cast<const char *>(this + 1) +
+						   key_size,
+					   value_size);
 		}
 
 		size_t timestamp;
@@ -231,29 +257,7 @@ private:
 	container_type *container;
 	std::unique_ptr<internal::config> config;
 
-	void bg_work()
-	{
-		while (!stopped.load()) {
-			auto acc = queue->consume();
-			for (auto str_v : acc) {
-				auto *e = reinterpret_cast<const queue_entry*>(str_v.data());
-
-				if (e->timestamp !=
-				    e->dram_entry->timestamp.load())
-					continue;
-
-				// XXX - make sure tx does not abort and use
-				// defer_free
-				if (e->value() == tombstone()) {
-					// container->erase(e->key());
-				} else {
-					container->insert_or_assign(e->key(), e->value());
-				}
-
-				consumed_dram_entries.emplace(e->key(), e->timestamp);
-			}
-		}
-	}
+	void bg_work();
 
 	static string_view tombstone()
 	{
@@ -313,12 +317,13 @@ public:
 	create(std::unique_ptr<internal::config> cfg) override
 	{
 		check_config_null(get_name(), cfg);
-		return std::unique_ptr<engine_base>(new heterogenous_radix(std::move(cfg)));
+		return std::unique_ptr<engine_base>(
+			new heterogenous_radix(std::move(cfg)));
 		// uint64_t dram_caching;
 		// if (cfg->get_uint64("dram_caching", &dram_caching) && dram_caching) {
-		// 	return std::unique_ptr<engine_base>(new heterogenous_radix(std::move(cfg)));
-		// } else {
-		// 	return std::unique_ptr<engine_base>(new radix(std::move(cfg)));
+		// 	return std::unique_ptr<engine_base>(new
+		// heterogenous_radix(std::move(cfg))); } else { 	return
+		// std::unique_ptr<engine_base>(new radix(std::move(cfg)));
 		// }
 	};
 
