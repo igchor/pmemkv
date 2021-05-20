@@ -448,6 +448,9 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 
 		callback(it->second->second.data().data(),
 			 it->second->second.data().size(), arg);
+
+		lru_list.splice(lru_list.begin(), lru_list, it->second);
+
 		return status::OK;
 	} else {
 		auto it = container->find(key);
