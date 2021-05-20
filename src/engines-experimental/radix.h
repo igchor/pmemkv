@@ -18,6 +18,9 @@
 
 #include <libpmemobj++/container/mpsc_queue.hpp>
 
+#include <list>
+
+#include <condition_variable>
 #include <mutex>
 #include <shared_mutex>
 
@@ -85,6 +88,12 @@ struct timestamped_entry {
 	size_t timestamp()
 	{
 		return timestamp_.load(std::memory_order_acquire);
+	}
+
+	bool clear_timestamp(size_t excpected_timestamp)
+	{
+		return timestamp_.compare_exchange_strong(excpected_timestamp, 0,
+							  std::memory_order_release);
 	}
 
 private:
@@ -195,16 +204,20 @@ public:
 	status get(string_view key, get_v_callback *callback, void *arg) final;
 
 private:
+	using dram_value_type =
+		std::pair<std::string, internal::radix::timestamped_entry<std::string>>;
+	using lru_list_type = std::list<dram_value_type>;
+	lru_list_type lru_list;
+
 	using container_type = internal::radix::map_type;
-	using dram_map_type =
-		std::map<std::string, internal::radix::timestamped_entry<std::string>,
-			 std::less<void>>;
+	using dram_map_type = std::map<string_view, lru_list_type::iterator>;
 	using pmem_queue_type = pmem::obj::experimental::mpsc_queue;
 	using pmem_queue_worker_type = pmem_queue_type::worker;
+
 	dram_map_type map;
 
 	struct queue_entry {
-		queue_entry(size_t timestamp, dram_map_type::mapped_type *dram_entry,
+		queue_entry(size_t timestamp, dram_value_type *dram_entry,
 			    string_view key, string_view value)
 		    : timestamp(timestamp),
 		      dram_entry(dram_entry),
@@ -236,7 +249,7 @@ private:
 		}
 
 		size_t timestamp;
-		dram_map_type::mapped_type *dram_entry;
+		dram_value_type *dram_entry;
 		size_t key_size;
 		size_t value_size;
 	};
@@ -251,11 +264,12 @@ private:
 
 	pmem::obj::pool_base pop;
 
-	tbb::concurrent_bounded_queue<std::pair<string_view, size_t>>
-		consumed_dram_entries; // XXX - string_view - must be protected by EBR
-
 	container_type *container;
 	std::unique_ptr<internal::config> config;
+
+	std::mutex eviction_lock;
+	std::condition_variable eviction_cv;
+	std::atomic<size_t> nodes_to_evict = 0;
 
 	void bg_work();
 

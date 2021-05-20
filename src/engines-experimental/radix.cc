@@ -375,32 +375,46 @@ heterogenous_radix::~heterogenous_radix()
 
 status heterogenous_radix::put(string_view key, string_view value)
 {
-	if (map.size() >= dram_size) {
-		std::pair<string_view, size_t> consumed_key;
+	auto it = map.find(key);
 
-		do {
-			consumed_dram_entries.pop(consumed_key);
-		} while (consumed_key.second !=
-			 map.find(consumed_key.first)->second.timestamp());
+	if (it != map.end()) {
+		lru_list.splice(lru_list.begin(), lru_list, it->second);
+		lru_list.begin()->second = value;
+	} else if (lru_list.size() < dram_size) {
+		lru_list.emplace_front(key, value);
+		auto ret = map.try_emplace(lru_list.begin()->first, lru_list.begin());
+		assert(ret.second);
+	} else {
+		std::unique_lock<std::mutex> lock(eviction_lock);
+		eviction_cv.wait(lock, [&] { return this->nodes_to_evict.load() > 0; });
+		for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
+			auto t = rit->second.timestamp();
+			if (t == 0) {
+				auto cnt = map.erase(rit->first);
+				assert(cnt == 1 && rit->first != key);
 
-		if (consumed_key.first != key) {
-			auto it = map.find(consumed_key.first);
-			assert(it != map.end());
+				lru_list.splice(lru_list.begin(), lru_list,
+						std::next(rit).base());
+				lru_list.begin()->first = key;
+				lru_list.begin()->second = value;
 
-			map.erase(it);
+				auto ret = map.try_emplace(lru_list.begin()->first,
+							   lru_list.begin());
+				assert(ret.second);
+
+				break;
+			}
 		}
+
+		nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
 	}
 
-	auto ret = map.emplace(key, value);
-	if (!ret.second)
-		ret.first->second = value;
+	typename std::aligned_storage<512, alignof(queue_entry)>::type buffer;
 
-	typename std::aligned_storage<64, alignof(queue_entry)>::type buffer;
+	new (&buffer) queue_entry(lru_list.begin()->second.timestamp(),
+				  &*lru_list.begin(), key, value);
 
-	new (&buffer) queue_entry(ret.first->second.timestamp(), &ret.first->second, key,
-				  value);
-
-	assert(queue_entry::size(key, value) < 64);
+	assert(queue_entry::size(key, value) < 512);
 
 	while (true) {
 		try {
@@ -429,10 +443,11 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 {
 	auto it = map.find(key);
 	if (it != map.end()) {
-		if (it->second.data() == tombstone())
+		if (it->second->second.data() == tombstone())
 			return status::NOT_FOUND;
 
-		callback(it->second.data().data(), it->second.data().size(), arg);
+		callback(it->second->second.data().data(),
+			 it->second->second.data().size(), arg);
 		return status::OK;
 	} else {
 		auto it = container->find(key);
@@ -492,7 +507,7 @@ status heterogenous_radix::get_all(get_kv_callback *callback, void *arg)
 			value = pmem_it->value();
 		} else {
 			key = dram_it->first;
-			value = dram_it->second.data();
+			value = dram_it->second->second.data();
 
 			if (value == tombstone()) {
 				++dram_it;
@@ -527,7 +542,7 @@ void heterogenous_radix::bg_work()
 		for (auto str_v : acc) {
 			auto *e = reinterpret_cast<const queue_entry *>(str_v.data());
 
-			if (e->timestamp != e->dram_entry->timestamp())
+			if (e->timestamp != e->dram_entry->second.timestamp())
 				continue;
 
 			// XXX - make sure tx does not abort and use
@@ -538,7 +553,10 @@ void heterogenous_radix::bg_work()
 				container->insert_or_assign(e->key(), e->value());
 			}
 
-			consumed_dram_entries.emplace(e->key(), e->timestamp);
+			if (e->dram_entry->second.clear_timestamp(e->timestamp)) {
+				nodes_to_evict.fetch_add(1, std::memory_order_release);
+				eviction_cv.notify_one();
+			}
 		}
 	}
 }
