@@ -205,7 +205,7 @@ public:
 
 private:
 	using dram_value_type =
-		std::pair<std::string, internal::radix::timestamped_entry<std::string>>;
+		std::pair<std::string, std::atomic<pmem::obj::experimental::inline_string*>>;
 	using lru_list_type = std::list<dram_value_type>;
 	lru_list_type lru_list;
 
@@ -217,10 +217,9 @@ private:
 	dram_map_type map;
 
 	struct queue_entry {
-		queue_entry(size_t timestamp, dram_value_type *dram_entry,
+		queue_entry(dram_value_type *dram_entry,
 			    string_view key_, string_view value_)
-		    : timestamp(timestamp),
-		      dram_entry(dram_entry),
+		    : dram_entry(dram_entry),
 		      key_(key_),
 		      value_(value_)
 		{
@@ -236,7 +235,6 @@ private:
 			return value_;
 		}
 
-		size_t timestamp;
 		dram_value_type *dram_entry;
 
 		std::string key_;

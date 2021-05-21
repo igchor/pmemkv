@@ -425,8 +425,21 @@ status heterogenous_radix::put(string_view key, string_view value)
 	cache_put(key, value, true);
 
 	// XXX - can use optimistic concurrency control to read data from pmem log???
+	// auto x = log.append();
+	// cache_put(key, x, true);
+	// and on get
+	//
+	// auto s = it->second.load();
+	// if (s.size() > THRESHOLD || (s.data() < queue_end && s.data() + s.size() > queue_end))
+	//     goto retry;
+	// auto x = new std::string(s.data(), s.size());
+	// if (it->second.load() != s)
+	//     goto retry;
+	// callback(x.data(), x.size());
+	// delete x;
 
-	// XXX - if try_produce == false, we can just allocate new radix node to
+	// XXX - if try_produce == false (or nodes_to_evict == 0), we can just allocate
+	// new radix node to
 	// TLS and the publish pointer to this node
 	// NEED TX support for produce():
 	// tx {
