@@ -373,7 +373,7 @@ heterogenous_radix::~heterogenous_radix()
 	bg_thread.join();
 }
 
-status heterogenous_radix::put(string_view key, string_view value)
+void heterogenous_radix::cache_put(string_view key, string_view value, bool write)
 {
 	auto it = map.find(key);
 
@@ -382,9 +382,18 @@ status heterogenous_radix::put(string_view key, string_view value)
 		lru_list.begin()->second = value;
 	} else if (lru_list.size() < dram_size) {
 		lru_list.emplace_front(key, value);
+
+		if (!write) {
+			lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
+			nodes_to_evict.fetch_add(1, std::memory_order_relaxed);
+		}
+
 		auto ret = map.try_emplace(lru_list.begin()->first, lru_list.begin());
 		assert(ret.second);
 	} else {
+		if (!write && nodes_to_evict.load() == 0)
+			return;
+
 		std::unique_lock<std::mutex> lock(eviction_lock);
 		eviction_cv.wait(lock, [&] { return this->nodes_to_evict.load() > 0; });
 		for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
@@ -398,6 +407,10 @@ status heterogenous_radix::put(string_view key, string_view value)
 				lru_list.begin()->first = key;
 				lru_list.begin()->second = value;
 
+				if (!write) {
+					lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
+				}
+
 				auto ret = map.try_emplace(lru_list.begin()->first,
 							   lru_list.begin());
 				assert(ret.second);
@@ -406,8 +419,14 @@ status heterogenous_radix::put(string_view key, string_view value)
 			}
 		}
 
-		nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+		if (write)
+			nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
 	}
+}
+
+status heterogenous_radix::put(string_view key, string_view value)
+{
+	cache_put(key, value, true);
 
 	typename std::aligned_storage<512, alignof(queue_entry)>::type buffer;
 
@@ -457,6 +476,9 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 		if (it != container->end()) {
 			auto value = string_view(it->value());
 			callback(value.data(), value.size(), arg);
+
+			cache_put(key, value, false);
+
 			return status::OK;
 		} else
 			return status::NOT_FOUND;

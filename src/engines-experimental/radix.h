@@ -273,6 +273,8 @@ private:
 
 	void bg_work();
 
+	void cache_put(string_view key, string_view value, bool block);
+
 	static string_view tombstone()
 	{
 		return "tombstone"; // XXX
