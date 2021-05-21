@@ -354,10 +354,6 @@ heterogenous_radix::heterogenous_radix(std::unique_ptr<internal::config> cfg)
 	// pmem_ptr->log->resize(log_size);
 
 	container = &pmem_ptr->map;
-	queue = std::unique_ptr<pmem_queue_type>(
-		new pmem_queue_type(pmem_ptr->log, log_size, 1));
-	worker = std::unique_ptr<pmem_queue_worker_type>(
-		new pmem_queue_worker_type(queue->register_worker()));
 
 	container->runtime_initialize_mt();
 
@@ -428,34 +424,36 @@ status heterogenous_radix::put(string_view key, string_view value)
 {
 	cache_put(key, value, true);
 
-	typename std::aligned_storage<512, alignof(queue_entry)>::type buffer;
+	// XXX - can use optimistic concurrency control to read data from pmem log???
 
-	new (&buffer) queue_entry(lru_list.begin()->second.timestamp(),
-				  &*lru_list.begin(), key, value);
+	// XXX - if try_produce == false, we can just allocate new radix node to
+	// TLS and the publish pointer to this node
+	// NEED TX support for produce():
+	// tx {
+	// queue.produce([&] (data) { data = make_persistent(); }) }
 
-	assert(queue_entry::size(key, value) < 512);
+	// XXX: how to add tx support for consume (multiple elements) if entires
+	// must be invalidated - release must be called oncommit only????
 
-	while (true) {
-		try {
-			auto acc = worker->produce(queue_entry::size(key, value));
-			acc.add((char *)&buffer, queue_entry::size(key, value));
-			return status::OK;
-		} catch (std::runtime_error &e) {
-		}
-	}
+	queue.emplace(new queue_entry(lru_list.begin()->second.timestamp(),
+				  &*lru_list.begin(), key, value));
 }
 
 status heterogenous_radix::remove(string_view k)
 {
-	auto exists_s = exists(k);
-	if (exists_s != status::OK && exists_s != status::NOT_FOUND)
-		return exists_s;
+	bool found = false;
+	auto it = map.find(k);
+	if (it == map.end()) {
+		found = container->find(k) != container->end();
+	} else {
+		found = it->second->second.data() != tombstone();
+	}
 
 	auto s = put(k, tombstone());
 	if (s != status::OK)
 		return s;
 
-	return exists_s;
+	return found ? status::OK : status::NOT_FOUND;
 }
 
 status heterogenous_radix::get(string_view key, get_v_callback *callback, void *arg)
@@ -477,7 +475,8 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 			auto value = string_view(it->value());
 			callback(value.data(), value.size(), arg);
 
-			cache_put(key, value, false);
+			// XXX - debug this!!!
+			// cache_put(key, value, false);
 
 			return status::OK;
 		} else
@@ -563,12 +562,10 @@ status heterogenous_radix::exists(string_view key)
 void heterogenous_radix::bg_work()
 {
 	while (!stopped.load()) {
-		auto acc = queue->consume();
-		for (auto str_v : acc) {
-			auto *e = reinterpret_cast<const queue_entry *>(str_v.data());
-
-			if (e->timestamp != e->dram_entry->second.timestamp())
-				continue;
+		queue_entry *e;
+		if (queue.try_pop(e)) {
+			//if (e->timestamp != e->dram_entry->second.timestamp())
+			//	continue;
 
 			// XXX - make sure tx does not abort and use
 			// defer_free
@@ -582,6 +579,8 @@ void heterogenous_radix::bg_work()
 				nodes_to_evict.fetch_add(1, std::memory_order_release);
 				eviction_cv.notify_one();
 			}
+
+			delete e;
 		}
 	}
 }

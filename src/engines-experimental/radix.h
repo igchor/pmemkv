@@ -218,46 +218,32 @@ private:
 
 	struct queue_entry {
 		queue_entry(size_t timestamp, dram_value_type *dram_entry,
-			    string_view key, string_view value)
+			    string_view key_, string_view value_)
 		    : timestamp(timestamp),
 		      dram_entry(dram_entry),
-		      key_size(key.size()),
-		      value_size(value.size())
+		      key_(key_),
+		      value_(value_)
 		{
-			memcpy(reinterpret_cast<char *>(this + 1), key.data(),
-			       key.size());
-			memcpy(reinterpret_cast<char *>(this + 1) + key.size(),
-			       value.data(), value.size());
-		}
-
-		static size_t size(string_view key, string_view value)
-		{
-			return sizeof(queue_entry) + key.size() + value.size();
 		}
 
 		string_view key() const
 		{
-			return string_view(reinterpret_cast<const char *>(this + 1),
-					   key_size);
+			return key_;
 		}
 
 		string_view value() const
 		{
-			return string_view(reinterpret_cast<const char *>(this + 1) +
-						   key_size,
-					   value_size);
+			return value_;
 		}
 
 		size_t timestamp;
 		dram_value_type *dram_entry;
-		size_t key_size;
-		size_t value_size;
+
+		std::string key_;
+		std::string value_;
 	};
 
 	size_t dram_size;
-
-	std::unique_ptr<pmem_queue_type> queue;
-	std::unique_ptr<pmem_queue_worker_type> worker;
 
 	std::atomic<bool> stopped;
 	std::thread bg_thread;
@@ -270,6 +256,8 @@ private:
 	std::mutex eviction_lock;
 	std::condition_variable eviction_cv;
 	std::atomic<size_t> nodes_to_evict = 0;
+
+	tbb::concurrent_bounded_queue<queue_entry*> queue;
 
 	void bg_work();
 
