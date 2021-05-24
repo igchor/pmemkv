@@ -138,6 +138,8 @@ if(ENGINE_RADIX)
 	list(APPEND SOURCE_FILES
 		src/engines-experimental/radix.h
 		src/engines-experimental/radix.cc
+		src/engines-experimental/art.h
+		src/engines-experimental/art.c
 	)
 endif()
 if(ENGINE_ROBINHOOD)

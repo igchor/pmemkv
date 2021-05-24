@@ -330,6 +330,9 @@ heterogenous_radix::heterogenous_radix(std::unique_ptr<internal::config> cfg)
 	// if (!cfg->get_uint64("dram_size", &dram_size))
 	// 	throw internal::invalid_argument("XXX");
 
+	auto ret = art_tree_init(&map);
+	assert(ret == 0);
+
 	size_t log_size = std::stoull(std::getenv("PMEMKV_LOG_SIZE"));
 	dram_size = std::stoull(std::getenv("PMEMKV_DRAM_SIZE"));
 
@@ -369,67 +372,71 @@ heterogenous_radix::~heterogenous_radix()
 	bg_thread.join();
 }
 
-void heterogenous_radix::cache_put(string_view key, string_view value, bool write)
+void heterogenous_radix::cache_put(string_view key, void* value, bool write)
 {
-	auto it = map.find(key);
+	auto ret = art_insert(&map, (unsigned char*) key.data(), key.size(), value);
+	if (ret)
+		delete ((std::string*) (ret));
 
-	if (it != map.end()) {
-		assert(write);
+	// auto it = map.find(key);
 
-		lru_list.splice(lru_list.begin(), lru_list, it->second);
+	// if (it != map.end()) {
+	// 	assert(write);
 
-		nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+	// 	lru_list.splice(lru_list.begin(), lru_list, it->second);
 
-		lru_list.begin()->second = value;
-	} else if (lru_list.size() < dram_size) {
-		lru_list.emplace_front(key, value);
+	// 	nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
 
-		if (!write) {
-			lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
-			nodes_to_evict.fetch_add(1, std::memory_order_relaxed);
-		}
+	// 	*lru_list.begin() = value;
+	// } else if (lru_list.size() < dram_size) {
+	// 	lru_list.emplace_front(value);
 
-		auto ret = map.insert({lru_list.begin()->first, lru_list.begin()});
-		assert(ret.second);
-	} else {
-		if (!write && nodes_to_evict.load() == 0)
-			return;
+	// 	if (!write) {
+	// 		lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
+	// 		nodes_to_evict.fetch_add(1, std::memory_order_relaxed);
+	// 	}
 
-		std::unique_lock<std::mutex> lock(eviction_lock);
-		eviction_cv.wait(lock, [&] { return this->nodes_to_evict.load() > 0; });
-		for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
-			auto t = rit->second.timestamp();
-			if (t == 0) {
-				auto cnt = map.unsafe_erase(rit->first);
-				assert(cnt == 1 && rit->first != key);
+	// 	auto ret = map.insert({lru_list.begin()->first, lru_list.begin()});
+	// 	assert(ret.second);
+	// } else {
+	// 	if (!write && nodes_to_evict.load() == 0)
+	// 		return;
 
-				lru_list.splice(lru_list.begin(), lru_list,
-						std::next(rit).base());
-				lru_list.begin()->first = key;
-				lru_list.begin()->second = value;
+	// 	std::unique_lock<std::mutex> lock(eviction_lock);
+	// 	eviction_cv.wait(lock, [&] { return this->nodes_to_evict.load() > 0; });
+	// 	for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
+	// 		auto t = rit->second.timestamp();
+	// 		if (t == 0) {
+	// 			auto cnt = map.unsafe_erase(rit->first);
+	// 			assert(cnt == 1 && rit->first != key);
 
-				if (!write) {
-					lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
-				}
+	// 			lru_list.splice(lru_list.begin(), lru_list,
+	// 					std::next(rit).base());
+	// 			lru_list.begin()->first = key;
+	// 			lru_list.begin()->second = value;
 
-				auto ret = map.insert({lru_list.begin()->first,
-							   lru_list.begin()});
-				assert(ret.second);
+	// 			if (!write) {
+	// 				lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
+	// 			}
 
-				if (write)
-					nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+	// 			auto ret = map.insert({lru_list.begin()->first,
+	// 						   lru_list.begin()});
+	// 			assert(ret.second);
 
-				return;
-			}
-		}
+	// 			if (write)
+	// 				nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
 
-		assert(false);
-	}
+	// 			return;
+	// 		}
+	// 	}
+
+	// 	assert(false);
+	// }
 }
 
 status heterogenous_radix::put(string_view key, string_view value)
 {
-	cache_put(key, value, true);
+	cache_put(key, new std::string(value.data(), value.size()), true);
 
 	// XXX - can use optimistic concurrency control to read data from pmem log???
 
@@ -442,8 +449,8 @@ status heterogenous_radix::put(string_view key, string_view value)
 	// XXX: how to add tx support for consume (multiple elements) if entires
 	// must be invalidated - release must be called oncommit only????
 
-	queue.emplace(new queue_entry(lru_list.begin()->second.timestamp(),
-				  &*lru_list.begin(), key, value));
+	queue.emplace(new queue_entry(0,
+				  nullptr, key, value));
 
 	return status::OK;
 }
@@ -451,31 +458,32 @@ status heterogenous_radix::put(string_view key, string_view value)
 status heterogenous_radix::remove(string_view k)
 {
 	bool found = false;
-	auto it = map.find(k);
-	if (it == map.end()) {
-		found = container->find(k) != container->end();
-	} else {
-		found = it->second->second.data() != tombstone();
-	}
+	// auto it = map.find(k);
+	// if (it == map.end()) {
+	// 	found = container->find(k) != container->end();
+	// } else {
+	// 	found = it->second->second.data() != tombstone();
+	// }
 
-	auto s = put(k, tombstone());
-	if (s != status::OK)
-		return s;
+	// auto s = put(k, tombstone());
+	// if (s != status::OK)
+	// 	return s;
 
 	return found ? status::OK : status::NOT_FOUND;
 }
 
 status heterogenous_radix::get(string_view key, get_v_callback *callback, void *arg)
 {
-	auto it = map.find(key);
-	if (it != map.end()) {
-		if (it->second->second.data() == tombstone())
+	auto ret = art_search(&map, (unsigned char*) key.data(), key.size());
+	if (ret != nullptr) {
+		auto str = (std::string*) ret;
+		if (*str == tombstone())
 			return status::NOT_FOUND;
 
-		callback(it->second->second.data().data(),
-			 it->second->second.data().size(), arg);
+		callback(str->data(),
+			 str->size(), arg);
 
-		lru_list.splice(lru_list.begin(), lru_list, it->second);
+//		lru_list.splice(lru_list.begin(), lru_list, it->second);
 
 		return status::OK;
 	} else {
@@ -484,7 +492,7 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 			auto value = string_view(it->value());
 			callback(value.data(), value.size(), arg);
 
-			cache_put(key, value, false);
+			cache_put(key, new std::string(value.data(), value.size()), false);
 
 			return status::OK;
 		} else
@@ -515,48 +523,48 @@ status heterogenous_radix::count_all(std::size_t &cnt)
 
 status heterogenous_radix::get_all(get_kv_callback *callback, void *arg)
 {
-	auto pmem_it = container->begin();
-	auto dram_it = map.begin();
+	// auto pmem_it = container->begin();
+	// auto dram_it = map.begin();
 
-	while (pmem_it != container->end() || dram_it != map.end()) {
-		string_view key;
-		string_view value;
+	// while (pmem_it != container->end() || dram_it != map.end()) {
+	// 	string_view key;
+	// 	string_view value;
 
-		/* If keys are the same, skip the one in pmem (the dram one is more
-		 * recent) */
-		if (pmem_it != container->end() && dram_it != map.end() &&
-		    dram_it->first == string_view(pmem_it->key())) {
-			++pmem_it;
-			continue;
-		}
+	// 	/* If keys are the same, skip the one in pmem (the dram one is more
+	// 	 * recent) */
+	// 	if (pmem_it != container->end() && dram_it != map.end() &&
+	// 	    dram_it->first == string_view(pmem_it->key())) {
+	// 		++pmem_it;
+	// 		continue;
+	// 	}
 
-		auto process_pmem = dram_it == map.end() ||
-			(pmem_it != container->end() &&
-			 dram_it->first.compare(pmem_it->key()) > 0);
+	// 	auto process_pmem = dram_it == map.end() ||
+	// 		(pmem_it != container->end() &&
+	// 		 dram_it->first.compare(pmem_it->key()) > 0);
 
-		if (process_pmem) {
-			key = pmem_it->key();
-			value = pmem_it->value();
-		} else {
-			key = dram_it->first;
-			value = dram_it->second->second.data();
+	// 	if (process_pmem) {
+	// 		key = pmem_it->key();
+	// 		value = pmem_it->value();
+	// 	} else {
+	// 		key = dram_it->first;
+	// 		value = dram_it->second->second.data();
 
-			if (value == tombstone()) {
-				++dram_it;
-				continue;
-			}
-		}
+	// 		if (value == tombstone()) {
+	// 			++dram_it;
+	// 			continue;
+	// 		}
+	// 	}
 
-		auto s =
-			callback(key.data(), key.size(), value.data(), value.size(), arg);
-		if (s != 0)
-			return status::STOPPED_BY_CB;
+	// 	auto s =
+	// 		callback(key.data(), key.size(), value.data(), value.size(), arg);
+	// 	if (s != 0)
+	// 		return status::STOPPED_BY_CB;
 
-		if (process_pmem)
-			++pmem_it;
-		else
-			++dram_it;
-	}
+	// 	if (process_pmem)
+	// 		++pmem_it;
+	// 	else
+	// 		++dram_it;
+	// }
 
 	return status::OK;
 }
@@ -584,10 +592,10 @@ void heterogenous_radix::bg_work()
 				container->insert_or_assign(e->key(), e->value());
 			}
 
-			if (e->dram_entry->second.clear_timestamp(e->timestamp)) {
-				nodes_to_evict.fetch_add(1, std::memory_order_release);
-				eviction_cv.notify_one();
-			}
+			// if (e->dram_entry->second.clear_timestamp(e->timestamp)) {
+			// 	nodes_to_evict.fetch_add(1, std::memory_order_release);
+			// 	eviction_cv.notify_one();
+			// }
 
 			delete e;
 		}

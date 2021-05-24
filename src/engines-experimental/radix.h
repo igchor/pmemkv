@@ -24,6 +24,8 @@
 #include <mutex>
 #include <shared_mutex>
 
+#include "art.h"
+
 namespace pmem
 {
 namespace kv
@@ -204,13 +206,12 @@ public:
 	status get(string_view key, get_v_callback *callback, void *arg) final;
 
 private:
-	using dram_value_type =
-		std::pair<std::string, internal::radix::timestamped_entry<std::string>>;
+	using dram_value_type = internal::radix::timestamped_entry<std::string>;
 	using lru_list_type = std::list<dram_value_type>;
 	lru_list_type lru_list;
 
 	using container_type = internal::radix::map_type;
-	using dram_map_type = tbb::concurrent_map<string_view, lru_list_type::iterator>;
+	using dram_map_type = art_tree;
 
 	dram_map_type map;
 
@@ -259,7 +260,7 @@ private:
 
 	void bg_work();
 
-	void cache_put(string_view key, string_view value, bool block);
+	void cache_put(string_view key, void* value, bool block);
 
 	static string_view tombstone()
 	{
