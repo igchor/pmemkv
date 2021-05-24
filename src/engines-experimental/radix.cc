@@ -389,7 +389,7 @@ void heterogenous_radix::cache_put(string_view key, string_view value, bool writ
 			nodes_to_evict.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		auto ret = map.try_emplace(lru_list.begin()->first, lru_list.begin());
+		auto ret = map.insert({lru_list.begin()->first, lru_list.begin()});
 		assert(ret.second);
 	} else {
 		if (!write && nodes_to_evict.load() == 0)
@@ -400,7 +400,7 @@ void heterogenous_radix::cache_put(string_view key, string_view value, bool writ
 		for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
 			auto t = rit->second.timestamp();
 			if (t == 0) {
-				auto cnt = map.erase(rit->first);
+				auto cnt = map.unsafe_erase(rit->first);
 				assert(cnt == 1 && rit->first != key);
 
 				lru_list.splice(lru_list.begin(), lru_list,
@@ -412,8 +412,8 @@ void heterogenous_radix::cache_put(string_view key, string_view value, bool writ
 					lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
 				}
 
-				auto ret = map.try_emplace(lru_list.begin()->first,
-							   lru_list.begin());
+				auto ret = map.insert({lru_list.begin()->first,
+							   lru_list.begin()});
 				assert(ret.second);
 
 				if (write)

@@ -16,7 +16,7 @@
 
 #include <atomic>
 
-#include <libpmemobj++/container/mpsc_queue.hpp>
+#include <tbb/concurrent_map.h>
 
 #include <list>
 
@@ -210,9 +210,7 @@ private:
 	lru_list_type lru_list;
 
 	using container_type = internal::radix::map_type;
-	using dram_map_type = std::map<string_view, lru_list_type::iterator>;
-	using pmem_queue_type = pmem::obj::experimental::mpsc_queue;
-	using pmem_queue_worker_type = pmem_queue_type::worker;
+	using dram_map_type = tbb::concurrent_map<string_view, lru_list_type::iterator>;
 
 	dram_map_type map;
 
