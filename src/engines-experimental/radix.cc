@@ -372,71 +372,66 @@ heterogenous_radix::~heterogenous_radix()
 	bg_thread.join();
 }
 
-void heterogenous_radix::cache_put(string_view key, void* value, bool write)
+void heterogenous_radix::cache_put(string_view key, string_view value, bool write)
 {
-	auto ret = art_insert(&map, (unsigned char*) key.data(), key.size(), value);
-	if (ret)
-		delete ((std::string*) (ret));
+	auto s = art_search(&map, (unsigned char*) key.data(), key.size());
 
-	// auto it = map.find(key);
+	if (s) {
+		assert(write);
+		auto it = (lru_list_type::iterator*) s;
+		lru_list.splice(lru_list.begin(), lru_list, *it);
 
-	// if (it != map.end()) {
-	// 	assert(write);
+		nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
 
-	// 	lru_list.splice(lru_list.begin(), lru_list, it->second);
+		lru_list.begin()->second = value;
+	} else if (lru_list.size() < dram_size) {
+		lru_list.emplace_front(key, value);
 
-	// 	nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+		if (!write) {
+			lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
+			nodes_to_evict.fetch_add(1, std::memory_order_relaxed);
+		}
 
-	// 	*lru_list.begin() = value;
-	// } else if (lru_list.size() < dram_size) {
-	// 	lru_list.emplace_front(value);
+		art_insert(&map, (unsigned char*) key.data(), key.size(), new lru_list_type::iterator(lru_list.begin()));
+	} else {
+		// if (!write && nodes_to_evict.load() == 0)
+		// 	return;
 
-	// 	if (!write) {
-	// 		lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
-	// 		nodes_to_evict.fetch_add(1, std::memory_order_relaxed);
-	// 	}
+		// std::unique_lock<std::mutex> lock(eviction_lock);
+		// eviction_cv.wait(lock, [&] { return this->nodes_to_evict.load() > 0; });
+		// for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
+		// 	auto t = rit->second.timestamp();
+		// 	if (t == 0) {
+		// 		auto cnt = map.unsafe_erase(rit->first);
+		// 		assert(cnt == 1 && rit->first != key);
 
-	// 	auto ret = map.insert({lru_list.begin()->first, lru_list.begin()});
-	// 	assert(ret.second);
-	// } else {
-	// 	if (!write && nodes_to_evict.load() == 0)
-	// 		return;
+		// 		lru_list.splice(lru_list.begin(), lru_list,
+		// 				std::next(rit).base());
+		// 		lru_list.begin()->first = key;
+		// 		lru_list.begin()->second = value;
 
-	// 	std::unique_lock<std::mutex> lock(eviction_lock);
-	// 	eviction_cv.wait(lock, [&] { return this->nodes_to_evict.load() > 0; });
-	// 	for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
-	// 		auto t = rit->second.timestamp();
-	// 		if (t == 0) {
-	// 			auto cnt = map.unsafe_erase(rit->first);
-	// 			assert(cnt == 1 && rit->first != key);
+		// 		if (!write) {
+		// 			lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
+		// 		}
 
-	// 			lru_list.splice(lru_list.begin(), lru_list,
-	// 					std::next(rit).base());
-	// 			lru_list.begin()->first = key;
-	// 			lru_list.begin()->second = value;
+		// 		auto ret = map.insert({lru_list.begin()->first,
+		// 					   lru_list.begin()});
+		// 		assert(ret.second);
 
-	// 			if (!write) {
-	// 				lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
-	// 			}
+		// 		if (write)
+		// 			nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
 
-	// 			auto ret = map.insert({lru_list.begin()->first,
-	// 						   lru_list.begin()});
-	// 			assert(ret.second);
+		// 		return;
+		// 	}
+		// }
 
-	// 			if (write)
-	// 				nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
-
-	// 			return;
-	// 		}
-	// 	}
-
-	// 	assert(false);
-	// }
+		// assert(false);
+	}
 }
 
 status heterogenous_radix::put(string_view key, string_view value)
 {
-	cache_put(key, new std::string(value.data(), value.size()), true);
+	cache_put(key, value, true);
 
 	// XXX - can use optimistic concurrency control to read data from pmem log???
 
@@ -476,14 +471,16 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 {
 	auto ret = art_search(&map, (unsigned char*) key.data(), key.size());
 	if (ret != nullptr) {
-		auto str = (std::string*) ret;
-		if (*str == tombstone())
+		auto &str = (*(lru_list_type::iterator*) ret);
+		if (str->second.data() == tombstone())
 			return status::NOT_FOUND;
 
-		callback(str->data(),
-			 str->size(), arg);
+		std::string tmp(str->second.data());
 
-//		lru_list.splice(lru_list.begin(), lru_list, it->second);
+		callback(tmp.data(),
+			 str->second.data().size(), arg);
+
+		lru_list.splice(lru_list.begin(), lru_list, str);
 
 		return status::OK;
 	} else {
@@ -492,7 +489,7 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 			auto value = string_view(it->value());
 			callback(value.data(), value.size(), arg);
 
-			cache_put(key, new std::string(value.data(), value.size()), false);
+			cache_put(key, value, false);
 
 			return status::OK;
 		} else

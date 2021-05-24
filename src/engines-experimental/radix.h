@@ -206,7 +206,7 @@ public:
 	status get(string_view key, get_v_callback *callback, void *arg) final;
 
 private:
-	using dram_value_type = internal::radix::timestamped_entry<std::string>;
+	using dram_value_type = std::pair<std::string, internal::radix::timestamped_entry<std::string>>;
 	using lru_list_type = std::list<dram_value_type>;
 	lru_list_type lru_list;
 
@@ -260,7 +260,7 @@ private:
 
 	void bg_work();
 
-	void cache_put(string_view key, void* value, bool block);
+	void cache_put(string_view key, string_view value, bool block);
 
 	static string_view tombstone()
 	{
