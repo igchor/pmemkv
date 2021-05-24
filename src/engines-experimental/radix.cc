@@ -374,7 +374,12 @@ void heterogenous_radix::cache_put(string_view key, string_view value, bool writ
 	auto it = map.find(key);
 
 	if (it != map.end()) {
+		assert(write);
+
 		lru_list.splice(lru_list.begin(), lru_list, it->second);
+
+		nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+
 		lru_list.begin()->second = value;
 	} else if (lru_list.size() < dram_size) {
 		lru_list.emplace_front(key, value);
@@ -411,12 +416,14 @@ void heterogenous_radix::cache_put(string_view key, string_view value, bool writ
 							   lru_list.begin());
 				assert(ret.second);
 
-				break;
+				if (write)
+					nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+
+				return;
 			}
 		}
 
-		if (write)
-			nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+		assert(false);
 	}
 }
 
@@ -437,6 +444,8 @@ status heterogenous_radix::put(string_view key, string_view value)
 
 	queue.emplace(new queue_entry(lru_list.begin()->second.timestamp(),
 				  &*lru_list.begin(), key, value));
+
+	return status::OK;
 }
 
 status heterogenous_radix::remove(string_view k)
@@ -475,8 +484,7 @@ status heterogenous_radix::get(string_view key, get_v_callback *callback, void *
 			auto value = string_view(it->value());
 			callback(value.data(), value.size(), arg);
 
-			// XXX - debug this!!!
-			// cache_put(key, value, false);
+			cache_put(key, value, false);
 
 			return status::OK;
 		} else
@@ -565,6 +573,7 @@ void heterogenous_radix::bg_work()
 		queue_entry *e;
 		if (queue.try_pop(e)) {
 			//if (e->timestamp != e->dram_entry->second.timestamp())
+			// nodes_to_evict.fetch_add(1);
 			//	continue;
 
 			// XXX - make sure tx does not abort and use
