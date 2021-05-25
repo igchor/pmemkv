@@ -321,6 +321,26 @@ void radix::Recover()
 
 // HETEROGENOUS_RADIX
 
+		heterogenous_radix::queue_entry::queue_entry(size_t timestamp, dram_value_type *dram_entry,
+			    string_view key_, string_view value_)
+		    : timestamp(timestamp),
+		      dram_entry(dram_entry),
+		      key_(key_),
+		      value_(value_)
+		{
+		}
+
+		string_view heterogenous_radix::queue_entry::key() const
+		{
+			return key_;
+		}
+
+		string_view heterogenous_radix::queue_entry::value() const
+		{
+			return value_;
+		}
+
+
 heterogenous_radix::heterogenous_radix(std::unique_ptr<internal::config> cfg)
     : pmemobj_engine_base(cfg, "pmemkv_radix"), config(std::move(cfg))
 {
@@ -371,14 +391,29 @@ heterogenous_radix::~heterogenous_radix()
 
 void heterogenous_radix::cache_put(string_view key, string_view value, bool write)
 {
-	auto it = map.find(key);
+	auto evict_cb = [&] (auto list) {
+		for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
+			auto t = rit->second.timestamp();
+			if (t == 0)
+				return std::next(rit).base();
+		}
+
+		return list.end();
+	};
+
+	auto ret = cache.put(key, value, evict_cb);
+
+	if (ret.second && write) {
+		auto cleared = ret.first->clear_timestamp();
+		assert(cleared);
+	}
 
 	if (it != map.end()) {
 		assert(write);
 
 		lru_list.splice(lru_list.begin(), lru_list, it->second);
 
-		nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+		consumed_cnt.fetch_sub(1, std::memory_order_relaxed);
 
 		lru_list.begin()->second = value;
 	} else if (lru_list.size() < dram_size) {
@@ -386,17 +421,17 @@ void heterogenous_radix::cache_put(string_view key, string_view value, bool writ
 
 		if (!write) {
 			lru_list.begin()->second.clear_timestamp(lru_list.begin()->second.timestamp());
-			nodes_to_evict.fetch_add(1, std::memory_order_relaxed);
+			consumed_cnt.fetch_add(1, std::memory_order_relaxed);
 		}
 
 		auto ret = map.try_emplace(lru_list.begin()->first, lru_list.begin());
 		assert(ret.second);
 	} else {
-		if (!write && nodes_to_evict.load() == 0)
+		if (!write && consumed_cnt.load() == 0)
 			return;
 
 		std::unique_lock<std::mutex> lock(eviction_lock);
-		eviction_cv.wait(lock, [&] { return this->nodes_to_evict.load() > 0; });
+		eviction_cv.wait(lock, [&] { return this->consumed_cnt.load() > 0; });
 		for (auto rit = lru_list.rbegin(); rit != lru_list.rend(); rit++) {
 			auto t = rit->second.timestamp();
 			if (t == 0) {
@@ -417,7 +452,7 @@ void heterogenous_radix::cache_put(string_view key, string_view value, bool writ
 				assert(ret.second);
 
 				if (write)
-					nodes_to_evict.fetch_sub(1, std::memory_order_relaxed);
+					consumed_cnt.fetch_sub(1, std::memory_order_relaxed);
 
 				return;
 			}
@@ -431,16 +466,12 @@ status heterogenous_radix::put(string_view key, string_view value)
 {
 	cache_put(key, value, true);
 
-	// XXX - can use optimistic concurrency control to read data from pmem log???
+	// XXX - can use optimistic concurrency control to read data from pmem log
 
 	// XXX - if try_produce == false, we can just allocate new radix node to
 	// TLS and the publish pointer to this node
 	// NEED TX support for produce():
-	// tx {
-	// queue.produce([&] (data) { data = make_persistent(); }) }
-
-	// XXX: how to add tx support for consume (multiple elements) if entires
-	// must be invalidated - release must be called oncommit only????
+	// tx {queue.produce([&] (data) { data = make_persistent(); }) }
 
 	queue.emplace(new queue_entry(lru_list.begin()->second.timestamp(),
 				  &*lru_list.begin(), key, value));
@@ -573,11 +604,10 @@ void heterogenous_radix::bg_work()
 		queue_entry *e;
 		if (queue.try_pop(e)) {
 			//if (e->timestamp != e->dram_entry->second.timestamp())
-			// nodes_to_evict.fetch_add(1);
+			// consumed_cnt.fetch_add(1);
 			//	continue;
 
-			// XXX - make sure tx does not abort and use
-			// defer_free
+			// XXX - make sure tx does not abort
 			if (e->value() == tombstone()) {
 				container->erase(e->key());
 			} else {
@@ -585,15 +615,15 @@ void heterogenous_radix::bg_work()
 			}
 
 			if (e->dram_entry->second.clear_timestamp(e->timestamp)) {
-				nodes_to_evict.fetch_add(1, std::memory_order_release);
+				consumed_cnt.fetch_add(1, std::memory_order_release);
 				eviction_cv.notify_one();
 			}
 
+			// XXX
 			delete e;
 		}
 	}
 }
-///
 
 internal::iterator_base *radix::new_iterator()
 {

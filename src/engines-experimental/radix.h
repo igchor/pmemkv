@@ -72,6 +72,11 @@ struct timestamped_entry {
 		timestamp_.store(current_timestamp(), std::memory_order_release);
 	}
 
+	timestamped_entry(timestamped_entry&& rhs) {
+		this->data_ = std::move(rhs.data_);
+		this->timestamp_.store(rhs.timestamp_.load(std::memory_order_acquire), std::memory_order_release);
+	}
+
 	template <typename K>
 	timestamped_entry &operator=(K &&rhs)
 	{
@@ -96,6 +101,12 @@ struct timestamped_entry {
 							  std::memory_order_release);
 	}
 
+	bool clear_timestamp(size_t excpected_timestamp)
+	{
+		return timestamp_.compare_exchange_strong(excpected_timestamp, 0,
+							  std::memory_order_release);
+	}
+
 private:
 	T data_;
 	std::atomic<size_t> timestamp_;
@@ -108,6 +119,66 @@ private:
 
 		return static_cast<uint64_t>(count);
 	}
+};
+
+template <typename Value>
+class ordered_cache {
+public:
+	ordered_cache(size_t max_size): max_size(max_size) {}
+
+	static string_view tombstone()
+	{
+		return "tombstone"; // XXX
+	}
+
+	template <typename F, typename... Args>
+	std::pair<Value*, bool> put(string_view key, Value&& v, F&& evict) {
+		auto ret = map.try_emplace(key, lru_list_type::iterator{});
+		if (ret.second) {
+			if (lru_list.size() < max_size) {
+				lru_list.emplace_front(ret.first, std::move(v));
+				*ret.first = lru_list.begin();
+			} else {
+				auto it = evict(lru_list);
+
+				if (it == lru_list.end())
+					return {nullptr, false};
+
+				auto cnt = map.erase(it->first);
+
+				assert(cnt == 1 && it->first != key);
+
+				lru_list.splice(lru_list.begin(), lru_list, it);
+				lru_list.begin()->first = ret.first;
+				lru_list.begin()->second = std::move(v);
+
+				*ret.first = lru_list.begin();
+			}
+		} else {
+			lru_list.splice(lru_list.begin(), lru_list, ret.first->second);
+			lru_list.begin()->second = value;
+		}
+
+		return {&ret.first->second, true};
+	}
+
+	std::pair<Value*, bool> get(string_view key) {
+		auto it = map.find(key);
+		if (it == map.end())
+			return std::pair<string_view, bool>{nullptr, false};
+		else
+			return std::pair<string_view, bool>{&it->second.data(), true};
+	}
+
+private:
+	using dram_value_type =
+		std::pair<std::map<std::string, lru_list_type::iterator>::iterator, Value>;
+	using lru_list_type = std::list<dram_value_type>;
+	using dram_map_type = std::map<std::string, lru_list_type::iterator>;
+
+	lru_list_type lru_list;
+	dram_map_type map;
+	const size_t max_size;
 };
 
 } /* namespace radix */
@@ -204,41 +275,21 @@ public:
 	status get(string_view key, get_v_callback *callback, void *arg) final;
 
 private:
-	using dram_value_type =
-		std::pair<std::string, internal::radix::timestamped_entry<std::string>>;
-	using lru_list_type = std::list<dram_value_type>;
-	lru_list_type lru_list;
-
 	using container_type = internal::radix::map_type;
-	using dram_map_type = std::map<string_view, lru_list_type::iterator>;
-	using pmem_queue_type = pmem::obj::experimental::mpsc_queue;
-	using pmem_queue_worker_type = pmem_queue_type::worker;
 
-	dram_map_type map;
+	ordered_cache cache;
 
 	struct queue_entry {
 		queue_entry(size_t timestamp, dram_value_type *dram_entry,
-			    string_view key_, string_view value_)
-		    : timestamp(timestamp),
-		      dram_entry(dram_entry),
-		      key_(key_),
-		      value_(value_)
-		{
-		}
+			    string_view key_, string_view value_);
 
-		string_view key() const
-		{
-			return key_;
-		}
-
-		string_view value() const
-		{
-			return value_;
-		}
+		string_view key() const;
+		string_view value() const;
 
 		size_t timestamp;
 		dram_value_type *dram_entry;
 
+		// XXX - inline_string
 		std::string key_;
 		std::string value_;
 	};
@@ -255,18 +306,13 @@ private:
 
 	std::mutex eviction_lock;
 	std::condition_variable eviction_cv;
-	std::atomic<size_t> nodes_to_evict = 0;
+	std::atomic<size_t> consumed_cnt = 0;
 
 	tbb::concurrent_bounded_queue<queue_entry*> queue;
 
 	void bg_work();
-
 	void cache_put(string_view key, string_view value, bool block);
-
-	static string_view tombstone()
-	{
-		return "tombstone"; // XXX
-	}
+	void cache_hit();
 };
 
 template <>
